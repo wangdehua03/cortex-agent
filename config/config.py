@@ -1,24 +1,36 @@
 from pathlib import Path
+import os
 
-# WORKDIR = Path.cwd()
-WORKDIR = Path('/data/PyProject-dev2/wangdehua')
+# WORKDIR = Path('/data/PyProject-dev2/wangdehua')
+# Agent 执行 bash / 文件操作的工作目录（路径沙箱限制在此目录内）
+WORKDIR = Path.cwd()
 APP_ROOT = Path.cwd()
 
-# LLM Client
+# LLM Client - Kimi (Moonshot) OpenAI 兼容 API
+# 请设置环境变量：export KIMI_API_KEY="your_api_key"
+# 可选设置环境变量覆盖模型：export KIMI_MODEL="kimi-for-coding"
+BASE_URL = 'https://api.kimi.com/coding/v1'
+API_KEY = os.environ.get('KIMI_API_KEY', '')
 
-# #Qwen3
-# API_KEY = 'NULL'
-# BASE_URL = 'http://172.55.209.32:8888/v1'
-# MODEL = "/model_cache/qwen/Qwen3-32B"
+# 可用模型（均为 256K 上下文、支持图片）：
+#   kimi-for-coding           编码专用模型
+#   kimi-for-coding-highspeed 编码专用模型（高速版）
+#   k3-256k                   通用模型
+#   k3                        通用模型
+MODEL = os.environ.get('KIMI_MODEL', 'kimi-for-coding')
 
-#qwen3.6-27b
-BASE_URL = 'http://172.16.1.8:8899/v1'
-MODEL = 'qwen3p6_27b'
-API_KEY = 'NULL'
-CONTEXT_WINDOW = 128_000
+# 根据模型自动匹配上下文窗口
+_CONTEXT_WINDOW_MAP = {
+    'kimi-for-coding': 262_144,
+    'kimi-for-coding-highspeed': 262_144,
+    'k3-256k': 262_144,
+    'k3': 262_144,
+}
+CONTEXT_WINDOW = _CONTEXT_WINDOW_MAP.get(MODEL, 262_144)
 
-#Tokenizer 
-TOKENIZER_PATH = APP_ROOT.joinpath("rsrc/tokenizer/qwen3-32B")
+# Tokenizer
+# 优先使用本地 tokenizer；找不到时 LLMClient 会自动回退到 tiktoken (cl100k_base)
+TOKENIZER_PATH = os.environ.get('TOKENIZER_PATH', APP_ROOT.joinpath("rsrc/tokenizer/qwen3-32B"))
 
 
 

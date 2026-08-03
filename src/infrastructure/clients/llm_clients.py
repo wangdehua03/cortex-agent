@@ -2,18 +2,53 @@ from openai import OpenAI
 from config.config import MODEL, BASE_URL, API_KEY, TOKENIZER_PATH
 from typing import List, Dict, Optional, Callable, Generator
 import json
+import os
 import time
 import tiktoken
 from transformers import AutoTokenizer
+
+
+class _TiktokenFallbackTokenizer:
+    """当本地 HuggingFace tokenizer 不可用时，使用 tiktoken cl100k_base 做近似 token 统计。"""
+
+    def __init__(self, encoding_name: str = "cl100k_base") -> None:
+        self.encoding = tiktoken.get_encoding(encoding_name)
+
+    def encode(self, text: str, add_special_tokens: bool = True) -> list:
+        # tiktoken 没有 add_special_tokens 语义，直接返回 token ids
+        return self.encoding.encode(text or "")
+
+    def apply_chat_template(self, messages: List[Dict[str, str]], tokenize: bool = True, add_generation_prompt: bool = True):
+        # 近似拼接：role + content，最后加上 generation prompt
+        parts = []
+        for msg in messages:
+            parts.append(f"{msg.get('role', 'user')}: {msg.get('content', '')}")
+        if add_generation_prompt:
+            parts.append("assistant: ")
+        text = "\n".join(parts)
+        if tokenize:
+            return self.encoding.encode(text)
+        return text
 
 
 class LLMClient:
 
     def __init__(self, base_url: str, api_key: str, max_retries: int = 3, retry_delay: float = 1.0) -> None:
         self.client = OpenAI(base_url=base_url, api_key=api_key)
-        self.tokenizer = AutoTokenizer.from_pretrained(TOKENIZER_PATH)
+        self.tokenizer = self._load_tokenizer()
         self.max_retries = max_retries
         self.retry_delay = retry_delay
+
+    def _load_tokenizer(self):
+        """加载本地 tokenizer，失败时回退到 tiktoken。"""
+        if os.path.isdir(TOKENIZER_PATH):
+            try:
+                return AutoTokenizer.from_pretrained(TOKENIZER_PATH)
+            except Exception as e:
+                print(f"\033[33m[Tokenizer Warning] 加载本地 tokenizer 失败: {e}，回退到 tiktoken (cl100k_base)\033[0m")
+                return _TiktokenFallbackTokenizer()
+        print(f"\033[33m[Tokenizer Warning] 本地 tokenizer 路径不存在: {TOKENIZER_PATH}，使用 tiktoken (cl100k_base) 做近似统计\033[0m")
+        return _TiktokenFallbackTokenizer()
 
     def _retry_call(self, func, *args, **kwargs):
         """Retry wrapper for LLM calls. Retries up to max_retries times on any exception."""
