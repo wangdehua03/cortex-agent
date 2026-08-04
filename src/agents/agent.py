@@ -12,6 +12,7 @@ from config.prompts.subagent import SUBAGENT_BASE, SUBAGENT_SKILL_SECTION
 from config.prompts.compact import (AUTO_COMPACT_SYSTEM, AUTO_COMPACT_SUMMARY_PROMPT,
      AUTO_COMPACT_SUMMARY_WRAPPER, AUTO_COMPACT_ASSISTANT_RESPONSE)
 from config.tools import LEAD_AGENT_TOOLS as MAIN_AGENT_TOOLS, TOOL_HANDLERS
+from config.tools.common import SHELL_TOOL_NAME
 from src.utils.managers import SkillLoader
 from src.infrastructure.message_bus import bus
 from src.infrastructure.task_store import tasks as task_store
@@ -73,7 +74,7 @@ class BaseAgent:
         self._stream_buffer = ""
         self._use_stream_buffer = False
         self._current_round = 0
-        # task_id → threading.Event, set() when background bash finishes
+        # task_id → threading.Event, set() when background shell finishes
         self._background_bash_tasks: dict[str, threading.Event] = {}
         # ContextStore: 对话历史集中管理（存储层 + 视图层）
         self._store = ContextStore(
@@ -249,7 +250,7 @@ class BaseAgent:
 
     def _process_tool_calls(self, assistant_message) -> list:
         """
-        处理工具调用，返回工具结果列表。bash 命令超时时在捕获层自动放入后台线程。
+        处理工具调用，返回工具结果列表。shell 命令超时时在捕获层自动放入后台线程。
         """
         tool_results = []
 
@@ -266,9 +267,9 @@ class BaseAgent:
             try:
                 output = self._process_single_tool(tool_name, args)
             except subprocess.TimeoutExpired:
-                if tool_name != "bash":
+                if tool_name != SHELL_TOOL_NAME:
                     raise
-                output = self._promote_bash_to_background(args.get("command", ""))
+                output = self._promote_shell_to_background(args.get("command", ""))
 
             print(f" {str(output)[:200]}")
             tool_results.append({
@@ -279,9 +280,9 @@ class BaseAgent:
 
         return tool_results
 
-    def _promote_bash_to_background(self, command: str) -> str:
-        """将超时的 bash 命令放入后台线程继续执行，完成后通过 bus 通知 agent。"""
-        task_id = f"bash_{uuid.uuid4().hex[:8]}"
+    def _promote_shell_to_background(self, command: str) -> str:
+        """将超时的 shell 命令放入后台线程继续执行，完成后通过 bus 通知 agent。"""
+        task_id = f"shell_{uuid.uuid4().hex[:8]}"
         event = threading.Event()
         self._background_bash_tasks[task_id] = event
         agent_name = getattr(self, "_agent_name", "agent")
@@ -292,11 +293,11 @@ class BaseAgent:
                 r = get_backend().run(command, str(WORKDIR), timeout=None)
                 out = (r.stdout + r.stderr).strip()[:50000]
                 output_text = (
-                    f"[background_bash_done] task={task_id} exit_code={r.returncode}\n{out}"
-                    if out else f"[background_bash_done] task={task_id} exit_code={r.returncode} (no output)"
+                    f"[background_shell_done] task={task_id} exit_code={r.returncode}\n{out}"
+                    if out else f"[background_shell_done] task={task_id} exit_code={r.returncode} (no output)"
                 )
             except Exception as ex:
-                output_text = f"[background_bash_done] task={task_id} error={ex}"
+                output_text = f"[background_shell_done] task={task_id} error={ex}"
             finally:
                 bus.send(agent_name, agent_name, output_text, msg_type="message")
                 event.set()

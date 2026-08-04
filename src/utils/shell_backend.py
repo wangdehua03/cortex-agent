@@ -24,6 +24,7 @@ class ShellBackend(ABC):
 
     name: str = "abstract"
     shell_note: str = "shell"          # 注入工具描述/prompt 的平台说明
+    syntax_guidance: str = "Use syntax appropriate for this shell."
     supports_interactive: bool = False
 
     # 命令分级清单（子类按平台覆盖）
@@ -52,6 +53,7 @@ class PosixBackend(ShellBackend):
 
     name = "posix"
     shell_note = "bash"
+    syntax_guidance = "Use bash syntax."
     supports_interactive = True
 
     def normalize_cmd(self, name: str) -> str:
@@ -264,6 +266,13 @@ class WindowsBackend(ShellBackend):
 
     name = "windows"
     shell_note = "Windows PowerShell"
+    syntax_guidance = (
+        "Use PowerShell syntax, NOT bash. "
+        "Avoid '&&', 'export', 'rm -rf', 'grep'. "
+        "Use ';' for chaining, '$env:VAR' for environment variables, "
+        "'Remove-Item -Recurse -Force' for recursive deletion, "
+        "and 'Select-String' for text search."
+    )
     supports_interactive = False
 
     dangerous_cmds = frozenset({

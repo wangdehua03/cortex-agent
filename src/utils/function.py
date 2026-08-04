@@ -605,7 +605,7 @@ def _is_interactive_command(command: str) -> bool:
     return False
 
 
-def run_bash(command: str, permission_callback: Optional[Callable[[str, str], bool]] = None) -> str:
+def run_shell_command(command: str, permission_callback: Optional[Callable[[str, str], bool]] = None) -> str:
     """Execute a shell command via the platform backend (bash on Linux/macOS,
     PowerShell on Windows).  May raise subprocess.TimeoutExpired if the command
     takes longer than 120s — the caller (_process_single_tool) is responsible

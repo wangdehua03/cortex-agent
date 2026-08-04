@@ -180,7 +180,7 @@ def run_single_agent():
     uiq = UserInputQueue()
     uiq.start()
 
-    # 将 UIQ 注册给 run_bash 的 _ask_permission 使用
+    # 将 UIQ 注册给 run_shell_command 的 _ask_permission 使用
     from src.utils.function import _set_user_input_queue
     _set_user_input_queue(uiq)
 

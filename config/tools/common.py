@@ -7,6 +7,9 @@ from config.config import APP_ROOT
 
 skill_loader = SkillLoader(skills_dir=APP_ROOT.joinpath('skills'))
 
+# 跨平台 shell 执行工具的统一名称（原名 bash，已改为与后端解耦）
+SHELL_TOOL_NAME = "run_shell"
+
 
 def _validate_and_call(handler, required_params, **kw):
     """Validate required parameters before calling the handler"""
@@ -19,18 +22,18 @@ def _validate_and_call(handler, required_params, **kw):
     return handler(**params)
 
 
-def _make_bash_handler(permission_callback=None):
-    """创建 bash handler，支持注入自定义 permission_callback"""
-    def _bash(**kw):
+def _make_shell_handler(permission_callback=None):
+    """创建 shell 执行 handler，支持注入自定义 permission_callback"""
+    def _shell(**kw):
         cmd = kw.get("command", "")
-        return run_bash(cmd, permission_callback=permission_callback)
-    return _bash
+        return run_shell_command(cmd, permission_callback=permission_callback)
+    return _shell
 
 
 def build_tool_handlers(permission_callback=None):
-    """构建 TOOL_HANDLERS dict，支持注入 bash 的 permission_callback"""
+    """构建 TOOL_HANDLERS dict，支持注入 shell 的 permission_callback"""
     return {
-        "bash":          _make_bash_handler(permission_callback),
+        SHELL_TOOL_NAME: _make_shell_handler(permission_callback),
         "read_file":     lambda **kw: _validate_and_call(run_read, ["path"], **kw),
         "write_file":    lambda **kw: _validate_and_call(run_write, ["path", "content"], **kw),
         "edit_file":     lambda **kw: _validate_and_call(run_edit, ["path", "old_text", "new_text"], **kw),
@@ -67,7 +70,7 @@ def register_send_message_handler(handlers: dict, sender: str):
 # 键为 tool name，值为 (args: dict, result: str) -> str
 # 原则：只记录"动作 + 锚点（路径、命令）"，不记录工具返回内容。
 MILESTONE_EXTRACTORS = {
-    "bash": lambda args, result: f"bash: {args.get('command', '')[:200]}",
+    SHELL_TOOL_NAME: lambda args, result: f"run_shell: {args.get('command', '')[:200]}",
     "read_file": lambda args, result: f"read_file: {args.get('path', '')}",
     "write_file": lambda args, result: f"write_file: {args.get('path', '')}",
     "edit_file": lambda args, result: f"edit_file: {args.get('path', '')}",
@@ -79,14 +82,17 @@ MILESTONE_EXTRACTORS = {
 }
 
 
-# ---------- 通用工具（bash, 文件读写, excel, todo）----------
+# ---------- 通用工具（shell, 文件读写, excel, todo）----------
 
 COMMON_TOOLS = [
     {
         "type": "function",
         "function": {
-            "name": "bash",
-            "description": f"Run a shell command in {get_backend().shell_note}. Use syntax appropriate for this shell.",
+            "name": SHELL_TOOL_NAME,
+            "description": (
+                f"Run a shell command in {get_backend().shell_note}. "
+                f"{get_backend().syntax_guidance}"
+            ),
             "parameters": {
                 "type": "object",
                 "properties": {"command": {"type": "string", "description": "command to be run"}},

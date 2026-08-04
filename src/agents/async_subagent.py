@@ -24,7 +24,7 @@ from src.infrastructure.clients.llm_clients import LLMClient
 from src.infrastructure.message_bus import bus, build_inbox_drain_fn
 from config.prompts.subagent import SUBAGENT_BASE
 from config.tools import SUB_AGENT_TOOLS, build_tool_handlers
-from config.tools.common import register_send_message_handler
+from config.tools.common import register_send_message_handler, SHELL_TOOL_NAME
 from config.tools.subagent import TODO_TOOL
 from config.config import CONTEXT_WINDOW, SUBAGENT_LOG_DIR, SUBAGENT_REVIEW_TIMEOUT_ROUNDS, SUBAGENT_REVIEW_SLEEP_INTERVAL
 from src.utils.managers import TodoManager
@@ -166,12 +166,12 @@ class AsyncSubAgent(BaseAgent):
                     tid: ev for tid, ev in self._background_bash_tasks.items() if not ev.is_set()
                 }
                 if not self._background_bash_tasks:
-                    # No running bash tasks → loop_core finished normally
+                    # No running shell tasks → loop_core finished normally
                     break
 
-                # Background bash running — poll inbox every 60s until all done
-                self._log("[Bash BG] Waiting for background tasks (60s poll)")
-                print(f"\033[33m[{self.subagent_id}] [Bash BG] Waiting for background tasks\033[0m")
+                # Background shell running — poll inbox every 60s until all done
+                self._log("[Shell BG] Waiting for background tasks (60s poll)")
+                print(f"\033[33m[{self.subagent_id}] [Shell BG] Waiting for background tasks\033[0m")
                 while self._background_bash_tasks:
                     inbox = bus.read_inbox(self.subagent_id)
                     for msg in inbox:
@@ -247,9 +247,9 @@ class AsyncSubAgent(BaseAgent):
             try:
                 output = self._process_single_tool(tool_name, args)
             except subprocess.TimeoutExpired:
-                if tool_name != "bash":
+                if tool_name != SHELL_TOOL_NAME:
                     raise
-                output = self._promote_bash_to_background(args.get("command", ""))
+                output = self._promote_shell_to_background(args.get("command", ""))
 
             if tool_name == 'todo':
                 used_todo = True
@@ -277,8 +277,8 @@ class AsyncSubAgent(BaseAgent):
             tid: ev for tid, ev in self._background_bash_tasks.items() if not ev.is_set()
         }
         if self._background_bash_tasks:
-            self._log("[Bash BG] Breaking loop — waiting for background tasks in outer loop")
-            print(f"\033[33m[{self.subagent_id}] [Bash BG] Breaking loop — waiting for background tasks\033[0m")
+            self._log("[Shell BG] Breaking loop — waiting for background tasks in outer loop")
+            print(f"\033[33m[{self.subagent_id}] [Shell BG] Breaking loop — waiting for background tasks\033[0m")
             return True
         return False
 
