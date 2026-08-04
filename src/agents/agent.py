@@ -18,6 +18,7 @@ from src.infrastructure.task_store import tasks as task_store
 from src.utils.stdio_redirect import LeadAgentLogger
 from src.infrastructure.context_store import ContextStore
 from src.utils.function import _get_user_input_queue
+from src.utils.shell_backend import get_backend
 import subprocess
 import json
 import re
@@ -286,14 +287,8 @@ class BaseAgent:
 
         def _bg_run():
             try:
-                r = subprocess.run(
-                    command,
-                    shell=True,
-                    cwd=str(WORKDIR),
-                    capture_output=True,
-                    text=True,
-                    preexec_fn=os.setsid,
-                )
+                # 通过平台后端执行（POSIX: bash+setsid；Windows: PowerShell+进程组）
+                r = get_backend().run(command, str(WORKDIR), timeout=None)
                 out = (r.stdout + r.stderr).strip()[:50000]
                 output_text = (
                     f"[background_bash_done] task={task_id} exit_code={r.returncode}\n{out}"

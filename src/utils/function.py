@@ -1,9 +1,6 @@
 import os
-import pty
 import re
-import select
 import shlex
-import signal
 import subprocess
 import sys
 import threading
@@ -15,6 +12,7 @@ from openpyxl.styles import Alignment
 
 sys.path.append(os.path.join(os.path.dirname(__file__), '../'))
 from config.config import WORKDIR
+from src.utils.shell_backend import get_backend
 
 
 # 全局用户输入队列注册，供 _ask_permission 使用
@@ -50,68 +48,13 @@ def _validate_command(
     2. 危险命令：sudo/shutdown/mkfs 等，向用户申请权限并明确警告（若提供回调）
     3. 白名单命令：直接放行
     4. 高风险命令参数校验：rm、chmod、chown、dd 等操作路径必须在工作目录内
+
+    命令分级清单由当前平台的 shell 后端提供（见 shell_backend.py）。
     """
-
-    dangerous_cmds = {
-        "sudo", "su", "shutdown", "reboot", "halt", "poweroff",
-        "mkfs", "fdisk", "dd", "mount", "umount", "insmod", "rmmod",
-        "visudo", "at", "systemctl", "service",
-        "iptables", "firewall-cmd",
-    }
-
-    sensitive_cmds = {
-        # 网络/下载类
-        "wget", "pip", "pip3", "npm", "npx",
-        # 进程相关
-        "kill", "killall",
-        # 邮件
-        "mail", "mailx", "sendmail", "mutt", "msmtp",
-    }
-
-    safe_cmds = {
-        # 文件操作
-        "ls", "cat", "head", "tail", "less", "more", "wc", "stat",
-        "file", "touch", "mkdir", "cp", "mv", "rm", "rmdir",
-        "find", "locate", "which", "whereis", "type",
-        # 文本/搜索
-        "grep", "sed", "awk", "cut", "sort", "uniq", "diff", "patch",
-        "tr", "tee", "xargs", "env", "printenv", "echo", "printf",
-        "basename", "dirname", "realpath", "readlink", "du", "df",
-        # 压缩归档
-        "tar", "gzip", "gunzip", "bzip2", "zip", "unzip",
-        "zcat", "bzcat", "base64", "xxd", "od", "uuencode", "uudecode",
-        # 编程/工具
-        "python", "python3",
-        "node", "npx",
-        "java", "javac", "jar",
-        "gcc", "g++", "make", "cmake",
-        "git", "hg", "svn",
-        "sqlite3", "kubectl", "helm", "docker", "docker-compose",
-        "perl", "ruby", "php", "go", "rustc",
-        "jq", "yq", "bc", "expr", "time", "timeout", "seq",
-        "test", "[",
-        # Shell 解释器与内置命令
-        "bash", "sh", "zsh", "dash", "source", ".", "eval",
-        "true", "false", "yes", "test", "type", "hash", "help",
-        "read", "unset", "local", "pushd", "popd", "dirs",
-        "command", "enable", "logout", "trap", "wait", "bg", "fg", "jobs",
-        # Shell 关键字/控制结构
-        "for", "while", "until", "if", "then", "else", "elif", "fi",
-        "case", "esac", "do", "done", "in", "select", "function",
-        "return", "exit", "break", "continue", "shift", "exec",
-        "local", "declare", "readonly", "typeset", "export",
-        # 其他
-        "date", "whoami", "id", "pwd", "hostname", "uname", "ip", "ping", "traceroute", "curl",
-        "ssh", "scp", "rsync", "nc", "ncat", "netcat", "sftp", "lftp",
-        "telnet", "ftp", "socat", "nmap", "arp", "ifconfig",
-        "tree", "watch", "yes", "sleep",
-        "lsof", "ps", "top", "df", "free", "vmstat", "iostat", "ss", "netstat",
-        "who", "w", "last", "lastlog", "id", "crontab",
-        "ln", "alias", "unalias", "export", "unset", "set", "shopt",
-        "cd",
-        # 高风险文件操作（通过 risky_cmds 路径校验限制范围）
-        "rm", "mv", "chmod", "chown", "chgrp", "dd",
-    }
+    backend = get_backend()
+    dangerous_cmds = backend.dangerous_cmds
+    sensitive_cmds = backend.sensitive_cmds
+    safe_cmds = backend.safe_cmds
 
     # -- 解析命令 --
     # 1) 去除注释行，保留所有非空非注释行，拼接为单行处理
@@ -364,6 +307,19 @@ def _validate_command(
                 continue
 
             token = tokens[real_idx]
+            # 兼容 PowerShell Verb-Noun / apt-get 这类连字符命令名：
+            # shlex(whitespace_split=False) 会把 Get-Location 拆成 ['Get', '-', 'Location']
+            # 仅当原始文本中该词确实连写（中间无空白）时才拼接，避免把 'ls -la' 误拼成 'ls-la'
+            word = token
+            j = real_idx + 1
+            while j + 1 < len(tokens) and tokens[j] == '-':
+                candidate = word + '-' + tokens[j + 1]
+                if candidate in seg:
+                    word = candidate
+                    j += 2
+                else:
+                    break
+            token = word
             tb = os.path.basename(token).lower()
 
             # 跳过 shell 关键字
@@ -542,7 +498,7 @@ def _validate_command(
     if not all_cmd_bases:
         return "Error: Empty command"
 
-    cmd_base = all_cmd_bases[0]
+    cmd_base = backend.normalize_cmd(all_cmd_bases[0])
 
     # Collect all rejection reasons first, then ask user once (not per-command)
     # Group by category: dangerous, sensitive, not in whitelist
@@ -552,6 +508,7 @@ def _validate_command(
     for cb in all_cmd_bases:
         if not cb:
             continue
+        cb = backend.normalize_cmd(cb)
         if cb in dangerous_cmds:
             dangerous_found.append(cb)
         elif cb in sensitive_cmds:
@@ -577,19 +534,17 @@ def _validate_command(
     except ValueError:
         seg_tokens = first_seg.split()
 
-    risky_cmds = {"rm", "mv", "chmod", "chown", "chgrp", "dd"}
+    risky_cmds = backend.risky_cmds
     if cmd_base in risky_cmds:
-        path_re = re.compile(r'^(/|\.{1,3}/|~)')
+        # 绝对路径判定：Unix 根路径、相对上级、home、Windows 盘符、UNC
+        path_re = re.compile(r'^(/|\.{1,3}/|~|[a-zA-Z]:[\\/]|\\\\)')
         for token in seg_tokens[1:]:
             if token.startswith("-"):
                 continue
             expanded = os.path.expanduser(token)
             if path_re.match(token) or os.path.isabs(expanded):
                 resolved = os.path.realpath(expanded)
-                try:
-                    if not resolved.startswith(str(WORKDIR)):
-                        path_reason_parts.append(f"Path outside workspace: {token}")
-                except ValueError:
+                if not _is_within_workspace(resolved):
                     path_reason_parts.append(f"Path outside workspace: {token}")
 
     # Deduplicate path reasons
@@ -628,28 +583,22 @@ def _ask_permission(reason: str, command: str) -> bool:
         return ans.strip().lower() in ("y", "yes")
 
 
-_INTERACTIVE_CMDS = {
-    "ssh", "scp", "sftp", "ftp", "telnet", "passwd", "sudo", "su",
-    "mount", "umount", "visudo", "crontab", "mysql", "psql", "mongosh",
-    "docker login", "kubectl", "gpg", "openssl",
-}
-
-
 def _is_interactive_command(command: str) -> bool:
-    """判断命令是否需要交互式输入（如密码、确认等）"""
+    """判断命令是否需要交互式输入（如密码、确认等）。清单由平台后端提供。"""
+    backend = get_backend()
     try:
         tokens = shlex.split(command.strip().splitlines()[0])
         if tokens:
-            cmd = tokens[0].split('/')[-1]  # remove path prefix
-            if cmd in _INTERACTIVE_CMDS:
+            cmd = backend.normalize_cmd(tokens[0])
+            if cmd in backend.interactive_cmds:
                 return True
             # Check for compound commands like 'docker login'
             cmd_full = ' '.join(tokens[:2]) if len(tokens) > 1 else cmd
-            if cmd_full in _INTERACTIVE_CMDS:
+            if cmd_full in backend.interactive_cmds:
                 return True
     except (ValueError, IndexError):
         pass
-    
+
     # 也检查命令中是否包含常见交互式参数模式
     if re.search(r'(ssh|scp|sftp|ftp|telnet)\s+\S+@', command):
         return True
@@ -657,158 +606,45 @@ def _is_interactive_command(command: str) -> bool:
 
 
 def run_bash(command: str, permission_callback: Optional[Callable[[str, str], bool]] = None) -> str:
-    """Execute a bash command.  May raise subprocess.TimeoutExpired if the
-    command takes longer than 120s — the caller (_process_single_tool) is
-    responsible for deciding whether to promote to background."""
+    """Execute a shell command via the platform backend (bash on Linux/macOS,
+    PowerShell on Windows).  May raise subprocess.TimeoutExpired if the command
+    takes longer than 120s — the caller (_process_single_tool) is responsible
+    for deciding whether to promote to background."""
     callback = permission_callback if permission_callback is not None else _ask_permission
     err = _validate_command(command, on_dangerous_command=callback)
     if err:
         return err
 
-    interactive = _is_interactive_command(command)
+    backend = get_backend()
+    if _is_interactive_command(command):
+        return backend.run_interactive(command, str(WORKDIR), _get_user_input_queue)
 
     try:
-        if interactive:
-            return _run_interactive_bash(command)
-        else:
-            return _run_non_interactive_bash(command)
+        r = backend.run(command, str(WORKDIR), timeout=120)
     except (FileNotFoundError, OSError) as e:
         return f"Error: {e}"
-
-
-def _run_non_interactive_bash(command: str) -> str:
-    """Run non-interactive bash command with 120s timeout.
-    Raises subprocess.TimeoutExpired on timeout."""
-    r = subprocess.run(
-        command,
-        shell=True,
-        cwd=str(WORKDIR),
-        capture_output=True,
-        text=True,
-        timeout=120,
-        preexec_fn=os.setsid,
-    )
-    out = (r.stdout + r.stderr).strip()
+    out = ((r.stdout or "") + (r.stderr or "")).strip()
     suffix = ""
     if r.returncode != 0:
         suffix = f"\n(return code: {r.returncode})"
     return (out[:50000] if out else "(no output)") + suffix
 
 
-def _run_interactive_bash(command: str) -> str:
-    """使用 pty 运行交互式命令，使子进程能直接获取终端输入。
+def _is_within_workspace(resolved: str) -> bool:
+    """判断 resolved 绝对路径是否位于 WORKDIR 内（Windows 下大小写不敏感比较）。"""
+    root = os.path.normcase(os.path.realpath(str(WORKDIR)))
+    target = os.path.normcase(resolved)
+    return target == root or target.startswith(root + os.sep)
 
-    执行期间会暂停 UserInputQueue 的 feed_loop，让子进程独占 stdin。
-    120s 超时后进入无限等待模式（不 kill），直到子进程退出或 stdin 关闭。
-    """
-    uiq = None
-    try:
-        uiq = _get_user_input_queue()
-    except LookupError:
-        pass
 
-    master_fd = None
-    stdin_fd = None
-    if hasattr(sys.stdin, 'fileno'):
-        try:
-            stdin_fd = sys.stdin.fileno()
-        except (AttributeError, OSError):
-            stdin_fd = None
 
-    try:
-        if uiq is not None:
-            uiq.block_for_interactive()
-
-        master_fd, slave_fd = pty.openpty()
-        proc = subprocess.Popen(
-            command,
-            shell=True,
-            cwd=str(WORKDIR),
-            stdin=slave_fd,
-            stdout=slave_fd,
-            stderr=slave_fd,
-            env=dict(os.environ),
-            preexec_fn=os.setsid,
-        )
-        os.close(slave_fd)
-
-        output_bytes = []
-
-        def _collect_master() -> str:
-            """读取 master 剩余数据并返回完整输出。"""
-            try:
-                while True:
-                    data = os.read(master_fd, 4096)
-                    if not data:
-                        break
-                    output_bytes.append(data)
-            except OSError:
-                pass
-            text = b''.join(output_bytes).decode('utf-8', errors='replace')
-            return (text[:50000].strip() if text.strip() else "(no output)")
-
-        watch_fds = [master_fd]
-        if stdin_fd is not None:
-            watch_fds.append(stdin_fd)
-
-        deadline = time.monotonic() + 120
-        in_wait = False
-
-        try:
-            while True:
-                remaining = deadline - time.monotonic()
-                timeout_arg = min(remaining, 0.5) if not in_wait else None
-                if not in_wait and timeout_arg <= 0:
-                    in_wait = True
-                    print("\033[33m[Interactive] 120s timeout — "
-                          "waiting for command to finish.\033[0m")
-
-                rlist, _, _ = select.select(watch_fds, [], [], timeout_arg)
-
-                for fd in rlist:
-                    try:
-                        if fd == master_fd:
-                            data = os.read(master_fd, 4096)
-                            if not data:
-                                proc.wait()
-                                return _collect_master()
-                            sys.stdout.write(data.decode('utf-8', errors='replace'))
-                            sys.stdout.flush()
-                            output_bytes.append(data)
-                        elif fd == stdin_fd:
-                            data = os.read(fd, 4096)
-                            if data:
-                                os.write(master_fd, data)
-                    except OSError:
-                        break
-
-                if proc.poll() is not None:
-                    return _collect_master()
-
-        finally:
-            if master_fd is not None:
-                try:
-                    os.close(master_fd)
-                except OSError:
-                    pass
-            if proc.poll() is None:
-                try:
-                    os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
-                except OSError:
-                    proc.terminate()
-                proc.wait()
-            if uiq is not None:
-                uiq.unblock_for_interactive()
-
-    except (ImportError, OSError) as e:
-        if uiq is not None:
-            uiq.unblock_for_interactive()
-        return f"Error: Failed to run interactive command: {e}"
-    
 def safe_path(p: str) -> Path:
-    """防止操作目录逃逸"""
-    path = (WORKDIR / p).resolve()
-    if not path.is_relative_to(WORKDIR):
+    """防止操作目录逃逸（Windows 下大小写不敏感比较）"""
+    root = WORKDIR.resolve()
+    path = (root / p).resolve()
+    root_s = os.path.normcase(str(root))
+    path_s = os.path.normcase(str(path))
+    if path_s != root_s and not path_s.startswith(root_s + os.sep):
         raise ValueError(f"Path escapes workspace: {p}")
     return path
 

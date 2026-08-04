@@ -2,6 +2,7 @@
 
 from src.utils.function import *
 from src.utils.managers import *
+from src.utils.shell_backend import get_backend
 from config.config import APP_ROOT
 
 skill_loader = SkillLoader(skills_dir=APP_ROOT.joinpath('skills'))
@@ -85,7 +86,7 @@ COMMON_TOOLS = [
         "type": "function",
         "function": {
             "name": "bash",
-            "description": "Run a shell command.",
+            "description": f"Run a shell command in {get_backend().shell_note}. Use syntax appropriate for this shell.",
             "parameters": {
                 "type": "object",
                 "properties": {"command": {"type": "string", "description": "command to be run"}},
