@@ -329,6 +329,10 @@ class UserInputQueue:
                 stdin_fd = sys.stdin.fileno()
             except (AttributeError, OSError):
                 pass
+        # Windows 的 select 只支持套接字，对 stdin fd 调用会抛 WinError 10038，
+        # 直接走 readline 阻塞读取路径
+        if sys.platform == "win32":
+            stdin_fd = None
 
         try:
             while self._running:
@@ -361,7 +365,9 @@ class UserInputQueue:
                 try:
                     rlist, _, _ = select.select([stdin_fd], [], [], 0.5)
                 except (ValueError, OSError):
-                    break
+                    # select 对该 fd 不可用（如某些平台的 stdin），降级为 readline 模式
+                    stdin_fd = None
+                    continue
 
                 if not rlist:
                     continue
