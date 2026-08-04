@@ -28,6 +28,19 @@ _CONTEXT_WINDOW_MAP = {
 }
 CONTEXT_WINDOW = _CONTEXT_WINDOW_MAP.get(MODEL, 262_144)
 
+# 模型默认温度参数映射
+# 说明：部分模型（如 Kimi K3）对 temperature=0 支持不佳，这里按模型给出默认温度。
+# 可通过环境变量 KIMI_TEMPERATURE 强制覆盖。
+_DEFAULT_TEMPERATURE_MAP = {
+    'kimi-for-coding': 1.0,
+    'kimi-for-coding-highspeed': 0.0,
+    'k3-256k': 1.0,
+    'k3': 1.0,
+}
+DEFAULT_TEMPERATURE = float(
+    os.environ.get('KIMI_TEMPERATURE', _DEFAULT_TEMPERATURE_MAP.get(MODEL, 0.0))
+)
+
 # Tokenizer
 # 优先使用本地 tokenizer；找不到时 LLMClient 会自动回退到 tiktoken (cl100k_base)
 TOKENIZER_PATH = os.environ.get('TOKENIZER_PATH', APP_ROOT.joinpath("rsrc/tokenizer/qwen3-32B"))

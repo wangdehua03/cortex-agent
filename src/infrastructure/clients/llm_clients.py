@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from openai import OpenAI, BadRequestError
-from config.config import MODEL, BASE_URL, API_KEY, TOKENIZER_PATH
+from config.config import MODEL, BASE_URL, API_KEY, TOKENIZER_PATH, DEFAULT_TEMPERATURE
 from typing import List, Dict, Optional, Callable, Generator
 import json
 import os
@@ -180,7 +180,7 @@ class LLMClient:
              model = MODEL,
              tools: List[Dict[str,str]] | None = None,
              max_tokens: int = 2048,
-             temperature = 0,
+             temperature = DEFAULT_TEMPERATURE,
              timeout=180):
         """Args:
         msg_list: [{"role":"user","content":"xxxx"}]
@@ -201,7 +201,7 @@ class LLMClient:
                     model: str = MODEL,
                     tools: List[Dict[str, str]] | None = None,
                     max_tokens: int = 2048,
-                    temperature: float = 0,
+                    temperature: float = DEFAULT_TEMPERATURE,
                     timeout: int = 180,
                     on_chunk: Optional[Callable[[str], None]] = None) -> 'StreamResponse':
         """

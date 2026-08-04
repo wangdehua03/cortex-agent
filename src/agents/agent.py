@@ -6,7 +6,7 @@ from config.config import (APP_ROOT, KEEP_RECENT_ROUNDS, CONTEXT_WINDOW,
                             AUTO_COMPACT_ENABLED, AUTO_COMPACT_THRESHOLD_RATIO, WORKDIR,
                             TASK_NAG_ROUNDS,
                             LOOP_DETECT_ENABLED, LOOP_DETECT_WINDOW, LOOP_REPEAT_THRESHOLD,
-                            LEAD_AGENT_LOG_DIR)
+                            LEAD_AGENT_LOG_DIR, DEFAULT_TEMPERATURE)
 from config.prompts.single import MAIN_AGENT, SKILL_SECTION
 from config.prompts.subagent import SUBAGENT_BASE, SUBAGENT_SKILL_SECTION
 from config.prompts.compact import (AUTO_COMPACT_SYSTEM, AUTO_COMPACT_SUMMARY_PROMPT,
@@ -192,7 +192,8 @@ class BaseAgent:
                 ],
                 stream=False,
                 tools=None,
-                max_tokens=2000
+                max_tokens=2000,
+                temperature=DEFAULT_TEMPERATURE,
             )
             summary_text = summary_response.choices[0].message.content
         except Exception as e:
@@ -747,6 +748,7 @@ class BaseAgent:
                         msg_list=msg_list,
                         tools=self.tools,
                         max_tokens=8_000,
+                        temperature=DEFAULT_TEMPERATURE,
                         on_chunk=self._on_chunk,
                     )
                 except Exception as e:
