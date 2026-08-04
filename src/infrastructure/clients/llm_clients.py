@@ -1,11 +1,12 @@
-from openai import OpenAI
+from __future__ import annotations
+
+from openai import OpenAI, BadRequestError
 from config.config import MODEL, BASE_URL, API_KEY, TOKENIZER_PATH
 from typing import List, Dict, Optional, Callable, Generator
 import json
 import os
 import time
 import tiktoken
-from transformers import AutoTokenizer
 
 
 class _TiktokenFallbackTokenizer:
@@ -38,11 +39,14 @@ class LLMClient:
         self.tokenizer = self._load_tokenizer()
         self.max_retries = max_retries
         self.retry_delay = retry_delay
+        # 是否支持 stream_options={"include_usage": True}（部分 OpenAI 兼容 API 会拒绝该参数）
+        self._stream_usage_supported = True
 
     def _load_tokenizer(self):
-        """加载本地 tokenizer，失败时回退到 tiktoken。"""
+        """加载本地 tokenizer，失败或未安装 transformers 时回退到 tiktoken。"""
         if os.path.isdir(TOKENIZER_PATH):
             try:
+                from transformers import AutoTokenizer
                 return AutoTokenizer.from_pretrained(TOKENIZER_PATH)
             except Exception as e:
                 print(f"\033[33m[Tokenizer Warning] 加载本地 tokenizer 失败: {e}，回退到 tiktoken (cl100k_base)\033[0m")
@@ -236,10 +240,8 @@ class LLMClient:
             timeout: int,
             on_chunk: Optional[Callable[[str], None]]) -> 'StreamResponse':
         """chat_stream 的实际实现，由 _retry_call 包裹重试。"""
-        # 计算 prompt tokens（输入消息的 token 数）
-        prompt_tokens = self._count_tokens(msg_list)
-
-        stream = self.client.chat.completions.create(
+        # 请求参数：优先让 API 在流式响应末尾返回 usage（真实计费 token 数）
+        create_kwargs = dict(
             model=model,
             messages=msg_list,
             max_tokens=max_tokens,
@@ -248,6 +250,20 @@ class LLMClient:
             stream=True,
             timeout=timeout
         )
+        if self._stream_usage_supported:
+            create_kwargs["stream_options"] = {"include_usage": True}
+
+        try:
+            stream = self.client.chat.completions.create(**create_kwargs)
+        except BadRequestError as e:
+            # 兼容不支持 stream_options 的 API：关闭后重试一次，并记住不再传该参数
+            if self._stream_usage_supported and 'stream_options' in str(e):
+                print("\033[33m[LLM Warning] API 不支持 stream_options，回退为本地 token 估算\033[0m")
+                self._stream_usage_supported = False
+                create_kwargs.pop("stream_options", None)
+                stream = self.client.chat.completions.create(**create_kwargs)
+            else:
+                raise
 
         # 累积流式响应
         full_content = ""
@@ -313,10 +329,12 @@ class LLMClient:
 
         # 如果 usage_info 存在且有效，使用它；否则一次性对完整输出计算 token 数
         if usage_info and (getattr(usage_info, 'prompt_tokens', 0) > 0 or getattr(usage_info, 'completion_tokens', 0) > 0):
-            # 使用 API 返回的 usage 信息
+            # 使用 API 返回的 usage 信息（真实计费 token 数，最准确）
             pass
         else:
+            # fallback：API 未返回 usage 时用本地 tokenizer 近似估算
             # 仅在 fallback 时 encode 完整文本一次，避免逐 chunk 编码的碎片效应
+            prompt_tokens = self._count_tokens(msg_list)
             completion_text = full_content
             for tc in tool_calls_data.values():
                 completion_text += tc['function']['arguments']
