@@ -3,6 +3,7 @@
 对上层（Agent、工具 schema、prompt）只暴露统一接口：
 - run()               非交互执行命令，超时抛 subprocess.TimeoutExpired
 - run_interactive()   交互式执行（需要伪终端，Windows 暂不支持，返回明确错误）
+- parse_command()     解析命令字符串，提取所有命令名与首个命令段 tokens
 - 命令分级清单        dangerous / sensitive / safe / risky / interactive（按平台各配一份）
 
 平台选择：get_backend() 按 sys.platform 返回进程级单例。
@@ -12,11 +13,21 @@
 from __future__ import annotations
 
 import os
+import re
+import shlex
 import subprocess
 import sys
 import time
 from abc import ABC, abstractmethod
-from typing import Callable, Optional
+from dataclasses import dataclass
+from typing import Callable, List, Optional
+
+
+@dataclass
+class CommandParseResult:
+    """命令解析结果：所有需要校验的命令名 + 首个命令段的 tokens（用于路径沙箱校验）。"""
+    command_names: List[str]
+    first_segment_tokens: List[str]
 
 
 class ShellBackend(ABC):
@@ -37,6 +48,14 @@ class ShellBackend(ABC):
     def normalize_cmd(self, name: str) -> str:
         """归一化命令名用于清单匹配。解析器已做 basename+lower，POSIX 下无需再处理。"""
         return name
+
+    @abstractmethod
+    def parse_command(self, command: str) -> CommandParseResult:
+        """解析命令字符串，返回所有需要校验的命令名以及首个命令段的 tokens。
+
+        平台差异（bash 控制流、PowerShell Verb-Noun/参数/反斜杠路径等）
+        由各后端自行实现，function.py 只负责按返回结果做统一分类校验。
+        """
 
     @abstractmethod
     def run(self, command: str, cwd: str, timeout: Optional[int]) -> subprocess.CompletedProcess:
@@ -254,6 +273,389 @@ class PosixBackend(ShellBackend):
                 uiq.unblock_for_interactive()
             return f"Error: Failed to run interactive command: {e}"
 
+    # ------------------------------------------------------------------
+    # parse_command implementation (moved from function.py)
+    # ------------------------------------------------------------------
+
+    def parse_command(self, command: str) -> CommandParseResult:
+        """POSIX/bash 命令解析器：提取所有命令名（含子 shell）以及首个命令段 tokens。"""
+
+        # -- 1) 去除注释行，跳过 heredoc 内容 --
+        raw_lines = command.strip().splitlines()
+        lines: list[str] = []
+        in_heredoc: str | None = None
+        for line in raw_lines:
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            if in_heredoc is None:
+                m = re.search(r"<<-?\s*(['\"]?)\w+\1\s*(?:$|[|;&<>])", stripped)
+                if m:
+                    in_heredoc = m.group(2)
+                    lines.append(stripped)
+                    continue
+            else:
+                if stripped == in_heredoc:
+                    in_heredoc = None
+                continue
+            lines.append(stripped)
+        if not lines:
+            return CommandParseResult(command_names=[], first_segment_tokens=[])
+        first_line = "; ".join(lines)
+
+        # -- helpers --
+        def _skip_quoted_or_grouped(text: str, start: int) -> int:
+            n = len(text)
+            i = start
+            while i < n:
+                c = text[i]
+                if c in ('"', "'"):
+                    quote = c
+                    i += 1
+                    while i < n and text[i] != quote:
+                        if text[i] == '\\' and i + 1 < n:
+                            i += 2
+                        else:
+                            i += 1
+                    i += 1
+                    continue
+                if c == '(':
+                    depth = 1
+                    i += 1
+                    while i < n and depth > 0:
+                        if text[i] == '(':
+                            depth += 1
+                        elif text[i] == ')':
+                            depth -= 1
+                        elif text[i] in ('"', "'"):
+                            quote = text[i]
+                            i += 1
+                            while i < n and text[i] != quote:
+                                if text[i] == '\\' and i + 1 < n:
+                                    i += 2
+                                else:
+                                    i += 1
+                            i += 1
+                            continue
+                        i += 1
+                    continue
+                return i
+            return i
+
+        def split_respecting_quotes(text: str) -> list[str]:
+            """按 && || ; | |& 分割，但跳过引号和 ( ) 子 shell 分组内的内容。"""
+            segments: list[str] = []
+            current: list[str] = []
+            i = 0
+            n = len(text)
+            while i < n:
+                c = text[i]
+                if c in ('"', "'") or c == '(':
+                    end = _skip_quoted_or_grouped(text, i)
+                    current.extend(text[i:end])
+                    i = end
+                    continue
+                matched_op = None
+                for op in ('|&', '&&', '||'):
+                    if text[i:i + len(op)] == op:
+                        before_ok = (i == 0 or text[i - 1].isspace() or current == [])
+                        j = i + len(op)
+                        after_ok = (j >= n or text[j].isspace())
+                        if before_ok and after_ok:
+                            matched_op = op
+                            break
+                if matched_op:
+                    segments.append(''.join(current))
+                    current = []
+                    i += len(matched_op)
+                    continue
+                if c == ';':
+                    escaped = (i > 0 and text[i - 1] == '\\')
+                    if i + 1 < n and text[i + 1] == ';':
+                        current.append(c)
+                        i += 1
+                        continue
+                    if not escaped:
+                        segments.append(''.join(current))
+                        current = []
+                    i += 1
+                    continue
+                if c == '|':
+                    before_ok = (i == 0 or text[i - 1].isspace() or current == [])
+                    if i + 1 < n and text[i + 1] == '|':
+                        current.append(c)
+                        i += 1
+                        continue
+                    after_ok = (i + 1 >= n or text[i + 1].isspace())
+                    if before_ok and after_ok:
+                        segments.append(''.join(current))
+                        current = []
+                        i += 1
+                        continue
+                    else:
+                        current.append(c)
+                        i += 1
+                        continue
+                current.append(c)
+                i += 1
+            segments.append(''.join(current))
+            return segments
+
+        _CASE_PATTERN_TOKEN_RE = re.compile(r'^[\w\*\?\[\] ]*\)$')
+
+        def _extract_tokens(text: str) -> list[str]:
+            text = text.strip()
+            if not text:
+                return []
+            try:
+                reader = shlex.shlex(text, posix=True)
+                reader.whitespace_split = False
+                reader.commenters = ''
+                return list(reader)
+            except ValueError:
+                return text.split()
+
+        def collect_cmd_bases(text: str, bases: list[str]) -> None:
+            segs = split_respecting_quotes(text)
+            for seg in segs:
+                seg = seg.strip()
+                if not seg:
+                    continue
+                tokens = _extract_tokens(seg)
+                if not tokens:
+                    _collect_subshells(seg, bases)
+                    continue
+
+                idx = 0
+                while idx < len(tokens):
+                    t = tokens[idx]
+                    if re.match(r'\d?[><]\S*', t) or t == '&':
+                        idx += 1
+                        continue
+                    if re.match(r'^\d+$', t) and idx + 1 < len(tokens) and tokens[idx + 1] in ('>', '<', '>>', '<<', '&>'):
+                        idx += 1
+                        continue
+                    break
+
+                if idx >= len(tokens):
+                    _collect_subshells(seg, bases)
+                    continue
+
+                token = tokens[idx]
+                tb = os.path.basename(token).lower()
+
+                _varname_re = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*$')
+
+                def _try_skip_assignments(start_idx: int) -> int:
+                    ci = start_idx
+                    while ci < len(tokens):
+                        maybe_var = tokens[ci]
+                        if _varname_re.match(maybe_var) and ci + 1 < len(tokens) and tokens[ci + 1] == '=':
+                            ci += 2
+                            while ci < len(tokens):
+                                vt = tokens[ci]
+                                if _varname_re.match(vt) and ci + 1 < len(tokens) and tokens[ci + 1] == '=':
+                                    break
+                                if vt in ('&&', '||', ';', '|', ')', '>', '<', '>>', '('):
+                                    break
+                                if vt == '(':
+                                    break
+                                ci += 1
+                            continue
+                        break
+                    return ci
+
+                real_idx = _try_skip_assignments(idx)
+                if real_idx < len(tokens):
+                    while real_idx < len(tokens):
+                        maybe_t = tokens[real_idx]
+                        if re.match(r'\d?[><]\S*', maybe_t) or maybe_t == '&':
+                            real_idx += 1
+                            continue
+                        break
+                if real_idx >= len(tokens):
+                    _collect_subshells(seg, bases)
+                    continue
+
+                token = tokens[real_idx]
+                word = token
+                j = real_idx + 1
+                while j + 1 < len(tokens) and tokens[j] == '-':
+                    candidate = word + '-' + tokens[j + 1]
+                    if candidate in seg:
+                        word = candidate
+                        j += 2
+                    else:
+                        break
+                token = word
+                tb = os.path.basename(token).lower()
+
+                if tb in {
+                    "for", "while", "until", "if", "then", "else", "elif", "fi",
+                    "case", "esac", "do", "done", "in", "select", "function",
+                    "return", "exit", "break", "continue", "shift", "exec",
+                    "local", "declare", "readonly", "typeset", "{", "}",
+                }:
+                    _collect_subshells(seg, bases)
+                    if tb in ("do", "then", "else", "elif"):
+                        _skip = _try_skip_assignments(real_idx + 1)
+                        ti = _skip
+                        while ti < len(tokens):
+                            tt = tokens[ti]
+                            if re.match(r'^\d+$', tt) and ti + 1 < len(tokens) and tokens[ti + 1] in ('>', '<', '>>', '<<', '&>'):
+                                ti += 1
+                                continue
+                            if tt in ('>', '<', '>>', '<<', '&>', '=', '|', '&') or re.match(r'^\d?[><]', tt):
+                                ti += 1
+                                while ti < len(tokens) and re.match(r'^[/\w\$\{\}\.\-\*~]', tokens[ti]):
+                                    if tokens[ti] in {'do', 'done', 'then', 'else', 'fi', 'esac', ';'}:
+                                        break
+                                    ti += 1
+                                continue
+                            ttb = os.path.basename(tt).lower()
+                            if ttb in {"do", "then", "else", "elif", "done", "fi", "esac",
+                                       "for", "while", "until", "if", "case", "}", "{"}:
+                                ti += 1
+                                continue
+                            if tt == '(':
+                                depth = 0
+                                sub_start = ti
+                                while ti < len(tokens):
+                                    if tokens[ti] == '(':
+                                        depth += 1
+                                    elif tokens[ti] == ')':
+                                        depth -= 1
+                                        if depth == 0:
+                                            inner_text = ' '.join(tokens[sub_start:ti + 1])
+                                            collect_cmd_bases(inner_text, bases)
+                                            ti += 1
+                                            break
+                                    ti += 1
+                                continue
+                            bases.append(ttb)
+                            break
+                    continue
+
+                if tb == '(':
+                    stripped = seg.strip()
+                    if stripped.startswith('(') and stripped.endswith(')'):
+                        inner = stripped[1:-1]
+                        collect_cmd_bases(inner, bases)
+                    _collect_subshells(seg, bases)
+                    continue
+
+                next_is_paren = (real_idx + 1 < len(tokens) and tokens[real_idx + 1] == ')')
+                is_case_pat = (next_is_paren and (
+                               token in ('*', '?',) or
+                               token.startswith('[') or
+                               _CASE_PATTERN_TOKEN_RE.match(token)))
+                if is_case_pat:
+                    j = real_idx + 1
+                    if j < len(tokens) and tokens[j] == ')':
+                        j += 1
+                    if j < len(tokens):
+                        sub = os.path.basename(tokens[j]).lower()
+                        bases.append(sub)
+                    _collect_subshells(seg, bases)
+                    continue
+
+                bases.append(tb)
+                _collect_subshells(seg, bases)
+
+        def _is_operator_char(ch: str) -> bool:
+            return ch in ('&', ';', '|', '(', ')', '<', '>')
+
+        def _collect_subshells(text: str, bases: list[str]) -> None:
+            i = 0
+            n = len(text)
+            while i < n:
+                c = text[i]
+                if c in ('"', "'"):
+                    quote = c
+                    i += 1
+                    while i < n and text[i] != quote:
+                        if text[i] == '\\' and i + 1 < n:
+                            i += 2
+                        else:
+                            i += 1
+                    i += 1
+                    continue
+                if text[i:i + 2] == '$(':
+                    depth = 0
+                    start = i
+                    j = i
+                    while j < n:
+                        if text[j:j + 2] == '$(':
+                            depth += 1
+                            j += 2
+                        elif text[j] == ')':
+                            depth -= 1
+                            if depth == 0:
+                                inner = text[start + 2:j]
+                                collect_cmd_bases(inner, bases)
+                                break
+                            j += 1
+                        else:
+                            j += 1
+                    i = j + 1 if j < n else j
+                    continue
+                if c == '(':
+                    before_ok = (i == 0 or text[i - 1].isspace() or
+                                 text[:i].strip() == '' or
+                                 (i > 0 and _is_operator_char(text[i - 1])))
+                    if before_ok:
+                        depth = 1
+                        start = i
+                        j = i + 1
+                        while j < n and depth > 0:
+                            if text[j] == '(' and (j == 0 or text[j - 1].isspace()):
+                                depth += 1
+                            elif text[j] == ')' and (j + 1 >= n or text[j + 1].isspace() or text[j + 1] in ('&', ';', '|')):
+                                depth -= 1
+                                if depth == 0:
+                                    inner = text[start + 1:j]
+                                    collect_cmd_bases(inner, bases)
+                                    break
+                            elif text[j] in ('"', "'"):
+                                q = text[j]
+                                j += 1
+                                while j < n and text[j] != q:
+                                    if text[j] == '\\' and j + 1 < n:
+                                        j += 2
+                                    else:
+                                        j += 1
+                            j += 1
+                        i = j + 1 if j < n else j
+                        continue
+                if c == '`':
+                    j = i + 1
+                    while j < n and text[j] != '`':
+                        if text[j] == '\\' and j + 1 < n:
+                            j += 2
+                        else:
+                            j += 1
+                    if j < n:
+                        inner = text[i + 1:j]
+                        collect_cmd_bases(inner, bases)
+                        i = j + 1
+                        continue
+                i += 1
+
+        all_cmd_bases: list[str] = []
+        collect_cmd_bases(first_line, all_cmd_bases)
+
+        # first segment tokens for risky-path check
+        first_seg = split_respecting_quotes(first_line)[0] if first_line else ""
+        try:
+            seg_tokens = shlex.split(first_seg)
+        except ValueError:
+            seg_tokens = first_seg.split()
+
+        return CommandParseResult(
+            command_names=all_cmd_bases,
+            first_segment_tokens=seg_tokens,
+        )
+
 
 class WindowsBackend(ShellBackend):
     """Windows 后端：PowerShell + CREATE_NEW_PROCESS_GROUP。
@@ -262,6 +664,7 @@ class WindowsBackend(ShellBackend):
     - 进程组：subprocess 在 Windows 上无 setsid，用 CREATE_NEW_PROCESS_GROUP 创建进程组
     - 超时：subprocess.run 超时会 kill shell 进程本身（子进程树清理待后续用 taskkill /T 完善）
     - 交互式命令：Windows 无伪终端，暂不支持（后续可引入 pywinpty）
+    - parse_command：提供 PowerShell 语法解析，支持 Verb-Noun cmdlet 拼接、$() 子表达式、反斜杠路径保留
     """
 
     name = "windows"
@@ -350,6 +753,224 @@ class WindowsBackend(ShellBackend):
             errors="replace",
             timeout=timeout,
             creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
+        )
+
+    # ------------------------------------------------------------------
+    # parse_command implementation (PowerShell-aware)
+    # ------------------------------------------------------------------
+
+    def parse_command(self, command: str) -> CommandParseResult:
+        """PowerShell 命令解析器：提取所有命令名（含 $() 子表达式）以及首个命令段 tokens。
+
+        支持：
+        - 按管道 | 和分号 ; 分割命令段（PowerShell 5.1 不支持 &&/||）
+        - 单/双引号及反引号 `` ` `` 转义
+        - Verb-Noun cmdlet 拼接（如 Get-ChildItem）
+        - $() 子表达式递归提取
+        - 保留反斜杠 Windows 路径
+        """
+
+        def _tokenize_ps(text: str) -> list[str]:
+            """PowerShell 简单 tokenizer：尊重引号与反引号转义。"""
+            tokens: list[str] = []
+            i = 0
+            n = len(text)
+            while i < n:
+                # 跳过空白
+                while i < n and text[i].isspace():
+                    i += 1
+                if i >= n:
+                    break
+                c = text[i]
+                # 单引号字符串
+                if c == "'":
+                    j = i + 1
+                    while j < n and text[j] != "'":
+                        j += 1
+                    tokens.append(text[i:j + 1])
+                    i = j + 1
+                    continue
+                # 双引号字符串（反引号转义）
+                if c == '"':
+                    j = i + 1
+                    while j < n:
+                        if text[j] == '`' and j + 1 < n:
+                            j += 2
+                        elif text[j] == '"':
+                            break
+                        else:
+                            j += 1
+                    tokens.append(text[i:j + 1])
+                    i = j + 1
+                    continue
+                # 普通 token：到下一个空白或特殊字符
+                j = i
+                while j < n and not text[j].isspace():
+                    if text[j] in ('|', ';', '(', ')', '{', '}', '&', '$'):
+                        # 作为独立 token 或保留在 token 内（如 $( ）
+                        if j == i:
+                            j += 1
+                        break
+                    j += 1
+                if j > i:
+                    tokens.append(text[i:j])
+                i = j
+            return tokens
+
+        def _reconstruct_cmdlets(tokens: list[str]) -> list[str]:
+            """将 shlex-like 拆分后断裂的 Verb-Noun 重新拼接，如 ['Get', '-', 'ChildItem'] -> ['Get-ChildItem']。"""
+            out: list[str] = []
+            i = 0
+            while i < len(tokens):
+                t = tokens[i]
+                # 检测 Verb-Noun 模式：Word - Word
+                if i + 2 < len(tokens) and tokens[i + 1] == '-' and tokens[i + 2].isalpha():
+                    combined = t + '-' + tokens[i + 2]
+                    out.append(combined)
+                    i += 3
+                    continue
+                out.append(t)
+                i += 1
+            return out
+
+        def _extract_commands_from_tokens(tokens: list[str]) -> list[str]:
+            """从 token 列表中提取命令名（首个非参数/非变量 token）。"""
+            names: list[str] = []
+            skip_next = False
+            for idx, t in enumerate(tokens):
+                if skip_next:
+                    skip_next = False
+                    continue
+                # 变量 / 参数 / 操作符
+                if t.startswith('$') or t.startswith('-') or t in ('|', ';', '(', ')', '{', '}', '&'):
+                    continue
+                # 处理 $( ... ) 子表达式
+                if t == '$(':
+                    # 找到匹配的 )
+                    depth = 1
+                    sub_tokens: list[str] = []
+                    j = idx + 1
+                    while j < len(tokens) and depth > 0:
+                        if tokens[j] == '$(':
+                            depth += 1
+                        elif tokens[j] == ')':
+                            depth -= 1
+                            if depth == 0:
+                                break
+                        if depth > 0:
+                            sub_tokens.append(tokens[j])
+                        j += 1
+                    skip_next = True  # 跳过后面的 )
+                    names.extend(_extract_commands_from_tokens(sub_tokens))
+                    continue
+                # 首个非特殊 token 视为命令名
+                names.append(self.normalize_cmd(t))
+                # 只取第一个命令名后停止（单段内）
+                break
+            return names
+
+        def _collect_all_commands(text: str) -> list[str]:
+            """递归收集文本中所有命令名（含子表达式）。"""
+            all_names: list[str] = []
+            # 先提取本层
+            tokens = _tokenize_ps(text)
+            tokens = _reconstruct_cmdlets(tokens)
+            names = _extract_commands_from_tokens(tokens)
+            all_names.extend(names)
+            # 递归处理 $( ... ) 子表达式（已经由 _extract_commands_from_tokens 处理，
+            # 但这里再扫描一遍纯文本以防遗漏未 tokenize 的嵌套）
+            i = 0
+            n = len(text)
+            while i < n:
+                if text[i] == '$' and i + 1 < n and text[i + 1] == '(':
+                    depth = 1
+                    start = i + 2
+                    j = start
+                    while j < n and depth > 0:
+                        if text[j] == '$' and j + 1 < n and text[j + 1] == '(':
+                            depth += 1
+                            j += 2
+                        elif text[j] == ')':
+                            depth -= 1
+                            if depth == 0:
+                                inner = text[start:j]
+                                all_names.extend(_collect_all_commands(inner))
+                                break
+                            j += 1
+                        else:
+                            j += 1
+                    i = j + 1 if j < n else j
+                    continue
+                i += 1
+            return all_names
+
+        # 分割命令段：按管道 | 和分号 ;
+        def _split_segments(text: str) -> list[str]:
+            segments: list[str] = []
+            current: list[str] = []
+            i = 0
+            n = len(text)
+            while i < n:
+                c = text[i]
+                # 跳过引号块
+                if c == "'":
+                    j = i + 1
+                    while j < n and text[j] != "'":
+                        j += 1
+                    current.extend(text[i:j + 1])
+                    i = j + 1
+                    continue
+                if c == '"':
+                    j = i + 1
+                    while j < n:
+                        if text[j] == '`' and j + 1 < n:
+                            j += 2
+                        elif text[j] == '"':
+                            break
+                        else:
+                            j += 1
+                    current.extend(text[i:j + 1])
+                    i = j + 1
+                    continue
+                if c == '|':
+                    segments.append(''.join(current))
+                    current = []
+                    i += 1
+                    continue
+                if c == ';':
+                    segments.append(''.join(current))
+                    current = []
+                    i += 1
+                    continue
+                current.append(c)
+                i += 1
+            segments.append(''.join(current))
+            return [s.strip() for s in segments if s.strip()]
+
+        raw = command.strip()
+        if not raw:
+            return CommandParseResult(command_names=[], first_segment_tokens=[])
+
+        segments = _split_segments(raw)
+        all_names: list[str] = []
+        for seg in segments:
+            all_names.extend(_collect_all_commands(seg))
+
+        # 去重并保持顺序
+        seen: set[str] = set()
+        deduped: list[str] = []
+        for name in all_names:
+            if name and name not in seen:
+                seen.add(name)
+                deduped.append(name)
+
+        first_seg_tokens: list[str] = []
+        if segments:
+            first_seg_tokens = _reconstruct_cmdlets(_tokenize_ps(segments[0]))
+
+        return CommandParseResult(
+            command_names=deduped,
+            first_segment_tokens=first_seg_tokens,
         )
 
 
