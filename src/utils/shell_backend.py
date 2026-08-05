@@ -844,6 +844,9 @@ class WindowsBackend(ShellBackend):
                 # 变量 / 参数 / 操作符
                 if t.startswith('$') or t.startswith('-') or t in ('|', ';', '(', ')', '{', '}', '&'):
                     continue
+                # Hashtable 键名 / 属性赋值，如 @{Name='...'; Expression={...}} 中的 Name= / Expression=
+                if t.endswith('=') or t == '@':
+                    continue
                 # 处理 $( ... ) 子表达式
                 if t == '$(':
                     # 找到匹配的 )
@@ -904,7 +907,7 @@ class WindowsBackend(ShellBackend):
                 i += 1
             return all_names
 
-        # 分割命令段：按管道 | 和分号 ;
+        # 分割命令段：按管道 | 和分号 ;（跳过引号、圆括号、花括号内的分隔符）
         def _split_segments(text: str) -> list[str]:
             segments: list[str] = []
             current: list[str] = []
@@ -931,6 +934,40 @@ class WindowsBackend(ShellBackend):
                             j += 1
                     current.extend(text[i:j + 1])
                     i = j + 1
+                    continue
+                # 跳过 (...) 和 {...} 分组，避免 hashtable/scriptblock 内部的 ; 被误判为段边界
+                if c in ('(', '{'):
+                    depth = 1
+                    close = ')' if c == '(' else '}'
+                    current.append(c)
+                    i += 1
+                    while i < n and depth > 0:
+                        ch = text[i]
+                        if ch == "'":
+                            j = i + 1
+                            while j < n and text[j] != "'":
+                                j += 1
+                            current.extend(text[i:j + 1])
+                            i = j + 1
+                            continue
+                        if ch == '"':
+                            j = i + 1
+                            while j < n:
+                                if text[j] == '`' and j + 1 < n:
+                                    j += 2
+                                elif text[j] == '"':
+                                    break
+                                else:
+                                    j += 1
+                            current.extend(text[i:j + 1])
+                            i = j + 1
+                            continue
+                        if ch == c:
+                            depth += 1
+                        elif ch == close:
+                            depth -= 1
+                        current.append(ch)
+                        i += 1
                     continue
                 if c == '|':
                     segments.append(''.join(current))
