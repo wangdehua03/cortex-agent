@@ -21,6 +21,7 @@ from pathlib import Path
 
 from src.agents.agent import BaseAgent
 from src.infrastructure.clients.llm_clients import LLMClient
+from src.infrastructure.conversation import Conversation
 from src.infrastructure.message_bus import bus, build_inbox_drain_fn
 from config.prompts.subagent import SUBAGENT_BASE
 from config.tools import SUB_AGENT_TOOLS, build_tool_handlers
@@ -122,13 +123,17 @@ class AsyncSubAgent(BaseAgent):
 
         return _request_permission
 
-    def run(self):
-        """在 thread 中执行的入口"""
+    def run(self, conversation: Conversation):
+        """在 thread 中执行的入口。
+
+        Args:
+            conversation: 该 SubAgent 需要处理的会话，由调用方持有并传入。
+        """
         self._tprint(f"\033[33m[{self.subagent_id}] Started | log: {self.log_path}\033[0m \n")
         self._log("SubAgent started")
 
         try:
-            self._execute()
+            self._execute(conversation)
         except KeyboardInterrupt:
             pass
         except Exception as e:
@@ -146,8 +151,8 @@ class AsyncSubAgent(BaseAgent):
 
         self._tprint(f"\033[33m[{self.subagent_id}] Finished | log: {self.log_path}\033[0m")
 
-    def _execute(self):
-        self._store.append_user_message(f"Task: {self._prompt}")
+    def _execute(self, conversation: Conversation):
+        conversation.context_store.append_user_message(f"Task: {self._prompt}")
 
         def on_shutdown(msg):
             self._log("Shutdown request received, aborting")
@@ -155,11 +160,15 @@ class AsyncSubAgent(BaseAgent):
             self._status = "shutdown"
             raise KeyboardInterrupt("shutdown_request received")
 
+        def on_loop_exit(msgs):
+            self._send_result(self._extract_final_text(msgs))
+            self._await_review(conversation)
+
         inbox_fn = build_inbox_drain_fn(self.subagent_id, on_shutdown=on_shutdown)
 
         try:
             while True:
-                self._loop_core(None, on_round_start=inbox_fn, on_loop_exit=self._on_loop_exit)
+                self._loop_core(conversation, on_round_start=inbox_fn, on_loop_exit=on_loop_exit)
 
                 # loop_core exited — check why
                 self._background_bash_tasks = {
@@ -179,7 +188,7 @@ class AsyncSubAgent(BaseAgent):
                             on_shutdown(msg)
                             return
                         content = msg.get("content", "")
-                        self._store.append_user_message(f"<inbox>{content}</inbox>")
+                        conversation.context_store.append_user_message(f"<inbox>{content}</inbox>")
                     # Remove completed tasks
                     self._background_bash_tasks = {
                         tid: ev for tid, ev in self._background_bash_tasks.items() if not ev.is_set()
@@ -284,10 +293,6 @@ class AsyncSubAgent(BaseAgent):
 
     # ---- Result & review ----
 
-    def _on_loop_exit(self, messages):
-        self._send_result(self._extract_final_text(messages))
-        self._await_review()
-
     def _send_result(self, result: str):
         bus.send(
             self.subagent_id,
@@ -299,7 +304,7 @@ class AsyncSubAgent(BaseAgent):
         self._log("Result sent to lead")
         self._tprint(f"\033[32m[{self.subagent_id}] Result sent to lead\033[0m")
 
-    def _await_review(self):
+    def _await_review(self, conversation: Conversation):
         self._status = "awaiting_review"
         self._log("Awaiting lead review...")
         self._tprint(f"\033[33m[{self.subagent_id}] Awaiting lead review...\033[0m")
@@ -319,16 +324,16 @@ class AsyncSubAgent(BaseAgent):
                         self._log("Received revision request")
                         self._tprint(f"\033[33m[{self.subagent_id}] Received revision request, continuing work\033[0m")
                         self._status = "running"
-                        self._store.append_user_message(f"<revision_feedback>\n{feedback}\n</revision_feedback>")
-                        self._continue_work()
+                        conversation.context_store.append_user_message(f"<revision_feedback>\n{feedback}\n</revision_feedback>")
+                        self._continue_work(conversation)
                         return
                     else:
                         content = msg.get("content", "")
                         self._log("Received message from lead")
                         self._tprint(f"\033[33m[{self.subagent_id}] Received message from lead, continuing work\033[0m")
                         self._status = "running"
-                        self._store.append_user_message(f"<lead_message>\n{content}\n</lead_message>")
-                        self._continue_work()
+                        conversation.context_store.append_user_message(f"<lead_message>\n{content}\n</lead_message>")
+                        self._continue_work(conversation)
                         return
 
             time.sleep(SUBAGENT_REVIEW_SLEEP_INTERVAL)
@@ -337,12 +342,15 @@ class AsyncSubAgent(BaseAgent):
         self._tprint(f"\033[33m[{self.subagent_id}] Review timeout, auto-shutdown\033[0m")
         self._status = "shutdown"
 
-    def _continue_work(self):
+    def _continue_work(self, conversation: Conversation):
         try:
-            self._loop_core(None, on_loop_exit=lambda msgs: (
-                self._send_result(self._extract_final_text(msgs)),
-                self._await_review(),
-            ))
+            self._loop_core(
+                conversation,
+                on_loop_exit=lambda msgs: (
+                    self._send_result(self._extract_final_text(msgs)),
+                    self._await_review(conversation),
+                ),
+            )
         except Exception as e:
             self._send_result(f"Error during revision: {e}")
 
@@ -354,10 +362,6 @@ class AsyncSubAgent(BaseAgent):
                 text = m["content"].strip()
                 return text if text else "(no output)"
         return "(no output)"
-
-    def _get_milestone_extractors(self) -> dict:
-        from config.tools import SUBAGENT_MILESTONE_EXTRACTORS
-        return dict(SUBAGENT_MILESTONE_EXTRACTORS)
 
     def _get_todo_status_for_compact(self) -> str:
         if self.todo_manager.items:
@@ -378,7 +382,8 @@ class AsyncSubAgent(BaseAgent):
 
 def spawn_subagent(lead_name: str, llm: LLMClient, prompt: str,
                    sys_prompt: str | None = None,
-                   context_window: int = CONTEXT_WINDOW) -> str:
+                   context_window: int = CONTEXT_WINDOW,
+                   conversation: Conversation | None = None) -> str:
     """
     工厂函数：创建并启动一个异步 SubAgent。
 
@@ -388,10 +393,13 @@ def spawn_subagent(lead_name: str, llm: LLMClient, prompt: str,
         prompt: 任务描述
         sys_prompt: 可选的系统 prompt，不传则使用 SUBAGENT_BASE
         context_window: 上下文窗口大小
+        conversation: 可选的 Conversation 实例，由调用方持有；不传则自动创建一个。
 
     Returns: subagent_id
     """
     subagent_id = f"sub_{str(uuid.uuid4())[:8]}"
+    if conversation is None:
+        conversation = Conversation()
     agent = AsyncSubAgent(
         subagent_id=subagent_id,
         llm=llm,
@@ -401,7 +409,7 @@ def spawn_subagent(lead_name: str, llm: LLMClient, prompt: str,
     )
     agent._lead_name = lead_name
 
-    thread = threading.Thread(target=agent.run, daemon=True)
+    thread = threading.Thread(target=agent.run, args=(conversation,), daemon=True)
     thread.start()
 
     return subagent_id

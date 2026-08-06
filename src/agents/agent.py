@@ -17,7 +17,7 @@ from src.utils.managers import SkillLoader
 from src.infrastructure.message_bus import bus
 from src.infrastructure.task_store import tasks as task_store
 from src.utils.stdio_redirect import LeadAgentLogger
-from src.infrastructure.context_store import ContextStore
+from src.infrastructure.conversation import Conversation
 from src.utils.function import _get_user_input_queue
 from src.utils.shell_backend import get_backend
 import subprocess
@@ -48,7 +48,11 @@ class UserSteerInterrupt(Exception):
 
 
 class BaseAgent:
-    """Agent 基类，提供公共属性和基础功能"""
+    """Agent 基类，提供公共属性和基础功能。
+
+    设计为无状态 worker：不持有任何 Conversation / ContextStore，所有会话状态
+    由调用方持有，并在调用 _loop_core / run 等方法时显式传入。
+    """
 
     def __init__(
             self,
@@ -57,7 +61,6 @@ class BaseAgent:
             tools: list,
             context_window: int,
             tool_handler: dict = TOOL_HANDLERS,
-            keep_recent_rounds: int = KEEP_RECENT_ROUNDS,
             max_continuation_rounds: int = 3) -> None:
         self.llm = llm
         self.sys_prompt = sys_prompt
@@ -65,7 +68,7 @@ class BaseAgent:
         self.context_window = context_window
         self.tool_handler = tool_handler
         self.max_continuation_rounds = max_continuation_rounds  # 截断后最大继续次数
-        self.token_used = 0 # 已经使用的token数量
+        self.token_used = 0  # 已经使用的 token 数量（来自 API 的 total_tokens，用于日志/统计）
         self._compact_count = 0  # 记录 auto_compact 压缩次数
         self.loop_detect_enabled = LOOP_DETECT_ENABLED  # 是否启用循环检测
         self.loop_detect_window = LOOP_DETECT_WINDOW  # 循环检测滑动窗口大小
@@ -76,16 +79,6 @@ class BaseAgent:
         self._current_round = 0
         # task_id → threading.Event, set() when background shell finishes
         self._background_bash_tasks: dict[str, threading.Event] = {}
-        # ContextStore: 对话历史集中管理（存储层 + 视图层）
-        self._store = ContextStore(
-            keep_recent_rounds=keep_recent_rounds,
-            milestone_extractors=self._get_milestone_extractors(),
-        )
-
-    def _get_milestone_extractors(self) -> dict:
-        """返回 milestone extractors 字典。子类可重写以使用对应的工具集配置。"""
-        from config.tools import MILESTONE_EXTRACTORS
-        return dict(MILESTONE_EXTRACTORS)
 
     def _should_break_loop(self, assistant_message) -> bool:
         """Post-tool-call exit check. Override in subclasses for custom exit conditions."""
@@ -95,8 +88,7 @@ class BaseAgent:
         """Check if there are any running background bash tasks."""
         return bool(self._background_bash_tasks)
 
-
-    def _compact_if_needed(self, msg_list: list, messages: list, pre_len: int) -> tuple[list, list, int]:
+    def _compact_if_needed(self, msg_list: list, messages: list, pre_len: int, conversation: Conversation) -> tuple[list, list, int]:
         """发送前用实际 token 数判断是否需要压缩，执行后返回 (new_msg_list, new_messages, new_pre_len)。
 
         压缩会替换 messages 的引用，因此需要同步更新 pre_len，
@@ -105,7 +97,7 @@ class BaseAgent:
         if not AUTO_COMPACT_ENABLED:
             return msg_list, messages, pre_len
 
-        prompt_tokens = self.llm._count_tokens(msg_list)
+        prompt_tokens = self._estimate_prompt_tokens(msg_list, messages, conversation)
         threshold = int(self.context_window * AUTO_COMPACT_THRESHOLD_RATIO)
         if prompt_tokens <= threshold:
             return msg_list, messages, pre_len
@@ -114,7 +106,7 @@ class BaseAgent:
         prefix = f"[{label}]" if label else "[Auto Compact]"
         # 压缩前先提交本轮已积累但未 commit 的消息，避免压缩后 pre_len 重置导致丢失
         if len(messages) > pre_len:
-            self._commit_to_store(messages, pre_len)
+            self._commit_to_store(messages, pre_len, conversation)
         print(f"\033[33m{prefix} Token usage high (prompt_tokens: {prompt_tokens}), compressing context...\033[0m", flush=True)
         # 最多压缩 2 次，防止压缩后仍超限或压缩失败死循环
         for _ in range(2):
@@ -127,10 +119,38 @@ class BaseAgent:
             print(f"\033[33m[Auto Compact] Still over threshold ({new_tokens}), retrying...\033[0m", flush=True)
         # 压缩后 messages 是新对象，pre_len 重置为压缩后长度
         pre_len = len(messages)
+        # 压缩会替换消息历史，之前的 API prompt_tokens 快照失效
+        conversation.token_tracker.invalidate()
         # 压缩后重置循环检测窗口
         if hasattr(self, '_loop_sig_window'):
             self._loop_sig_window.clear()
         return msg_list, messages, pre_len
+
+    def _estimate_prompt_tokens(self, msg_list: list, messages: list, conversation: Conversation) -> int:
+        """
+        估算当前待发送 prompt 的 token 数。
+
+        策略：
+        - 如果 API 上次返回了精确的 prompt_tokens，且当前 messages 只是在上次快照基础上追加，
+          则使用精确值 + 只对新增消息做本地 tokenizer 估算，减少整轮重算误差。
+        - 其他情况（无快照、发生过压缩等）回退到本地 tokenizer 整轮估算。
+        """
+        tracker = conversation.token_tracker
+        last_prompt_tokens = tracker.last_prompt_tokens
+        last_messages_snapshot = tracker.last_messages_snapshot
+        if (
+            last_prompt_tokens > 0
+            and last_messages_snapshot
+            and len(messages) >= len(last_messages_snapshot)
+        ):
+            snapshot_len = len(last_messages_snapshot)
+            if messages[:snapshot_len] == last_messages_snapshot:
+                new_messages = messages[snapshot_len:]
+                # 新增消息 token 数通常很小，本地估算即可；系统 prompt 已包含在精确值中
+                delta_tokens = self.llm._count_tokens(new_messages) if new_messages else 0
+                return last_prompt_tokens + delta_tokens
+        # 回退：对完整 msg_list（含 system prompt）做本地 tokenizer 估算
+        return self.llm._count_tokens(msg_list)
 
     def auto_compact(self, messages: list) -> list:
         """
@@ -304,7 +324,7 @@ class BaseAgent:
 
         threading.Thread(target=_bg_run, daemon=True).start()
         return (
-            f"[long-running command promoted to background]\n"
+            f"\033[33m[long-running command promoted to background]\033[0m\n"
             f"  - Task ID: {task_id}\n"
             f"  - Command: {command[:200]}\n\n"
             "The command is now running in the background. You will be notified when it completes."
@@ -685,7 +705,7 @@ class BaseAgent:
 
     def _loop_core(
         self,
-        messages: list | None = None,
+        conversation: Conversation,
         *,
         max_rounds: int | None = None,
         on_round_start: callable | None = None,
@@ -698,7 +718,7 @@ class BaseAgent:
         对 Agent / SubAgent 完全一致，差异通过回调参数化。
 
         Args:
-            messages: 对话历史列表。传 None 时从 self._store.build_context() 构建。
+            conversation: 当前会话，包含 ContextStore 和 TokenTracker。
 
         on_round_start: 每轮迭代开始时调用的回调，接收 messages 参数。可以返回一个 dict，
             如果有返回值则 append 到 messages 中。用于 inbox drain、
@@ -707,8 +727,7 @@ class BaseAgent:
         Returns:
             如果 max_rounds 被设置（委托模式），返回最终文本；否则返回 None。
         """
-        using_store = messages is None
-        messages = self._store.build_context() if using_store else list(messages)
+        messages = conversation.context_store.build_context()
         pre_len = len(messages)
 
         assistant_message = None
@@ -739,7 +758,7 @@ class BaseAgent:
                             messages.append(extra)
 
                 msg_list = [{"role": "system", "content": self.sys_prompt}] + messages
-                msg_list, messages, pre_len = self._compact_if_needed(msg_list, messages, pre_len)
+                msg_list, messages, pre_len = self._compact_if_needed(msg_list, messages, pre_len, conversation)
 
                 # 流式调用
                 self._print_round_prefix()
@@ -763,7 +782,12 @@ class BaseAgent:
 
                 # token 累计（无论是否截断都要累计）
                 if response.usage:
+                    prompt_tokens = getattr(response.usage, "prompt_tokens", 0)
                     total_tokens = getattr(response.usage, "total_tokens", 0)
+                    if prompt_tokens > 0:
+                        # 记录 API 返回的精确 prompt_tokens 到会话级 TokenTracker，
+                        # 供下一轮 _compact_if_needed 使用
+                        conversation.token_tracker.record(prompt_tokens, messages)
                     self.token_used = self._accumulate_tokens(total_tokens)
 
                 # 处理截断情况：方案三 - 截断后继续
@@ -805,17 +829,15 @@ class BaseAgent:
                         self._break_loop(messages)
         except UserSteerInterrupt:
             # 中断前仍然 commit 已积累的消息（保证 raw_events 写入顺序与 log 一致）
-            if using_store:
-                self._commit_to_store(messages, pre_len)
+            self._commit_to_store(messages, pre_len, conversation)
             raise
 
         # 循环退出回调
         if on_loop_exit is not None:
             on_loop_exit(messages)
 
-        # 如果通过 store 获取的 messages，将本轮新消息 commit 回 store
-        if using_store:
-            self._commit_to_store(messages, pre_len)
+        # 将本轮新消息 commit 回 store
+        self._commit_to_store(messages, pre_len, conversation)
 
         # 委托模式返回最终文本
         if max_rounds is not None:
@@ -825,8 +847,8 @@ class BaseAgent:
             return final_text if final_text.strip() else "(no summary)"
         return None
 
-    def _commit_to_store(self, messages: list, pre_len: int) -> None:
-        """将本轮 _loop_core 产生的新消息 commit 回 self._store。
+    def _commit_to_store(self, messages: list, pre_len: int, conversation: Conversation) -> None:
+        """将本轮 _loop_core 产生的新消息 commit 回 conversation.context_store。
 
         同时将 main.py 中通过 append_user_message 写入的 turn_id=None
         触发用户消息（以及可能的 steer）重新绑定到当前 turn_id，
@@ -850,29 +872,35 @@ class BaseAgent:
             if not m:
                 m = re.search(r"<summary_checkpoint>(.*?)</summary_checkpoint>", raw, re.DOTALL)
             summary_text = m.group(1).strip() if m else raw
-            self._store.append_summary_checkpoint(summary_text)
+            conversation.context_store.append_summary_checkpoint(summary_text)
             # Only commit genuinely new messages from _loop_core.
             # The "bridge" context (recent_messages from auto_compact) already exists
             # in raw_events before the checkpoint. build_context handles re-injection.
-            turn_id = self._store.next_turn_id()
-            self._store.commit_turn(new_messages, turn_id,
+            turn_id = conversation.context_store.next_turn_id()
+            conversation.context_store.commit_turn(new_messages, turn_id,
                                     rebind_pending_non_turn_users=True)
         else:
-            turn_id = self._store.next_turn_id()
-            self._store.commit_turn(new_messages, turn_id,
+            turn_id = conversation.context_store.next_turn_id()
+            conversation.context_store.commit_turn(new_messages, turn_id,
                                     rebind_pending_non_turn_users=True)
 
 class Agent(BaseAgent):
 
     def __init__(
-            self, 
+            self,
             llm: LLMClient,
             context_window: int,
             tools: list = MAIN_AGENT_TOOLS,
             tool_handler: dict = TOOL_HANDLERS) -> None:
         self._agent_name = "lead"
         # 先不设置 sys_prompt，等 skill_loader 初始化后再构建
-        super().__init__(llm=llm, context_window=context_window, sys_prompt="", tools=tools, tool_handler=tool_handler)
+        super().__init__(
+            llm=llm,
+            context_window=context_window,
+            sys_prompt="",
+            tools=tools,
+            tool_handler=tool_handler,
+        )
         self.skill_loader = SkillLoader(skills_dir=APP_ROOT.joinpath('skills'))
         self.sys_prompt = self._build_sys_prompt()
         # Pending subagent 跟踪：spawn 时加入，subagent_done 时移除
@@ -888,10 +916,6 @@ class Agent(BaseAgent):
         self.log_path = str(log_file)
         self._logger = LeadAgentLogger("Lead", log_file)
         self._log("LeadAgent started")
-
-    def _get_milestone_extractors(self) -> dict:
-        from config.tools import LEAD_MILESTONE_EXTRACTORS
-        return dict(LEAD_MILESTONE_EXTRACTORS)
 
     def _process_single_tool(self, tool_name: str, args: dict) -> str:
         """
@@ -1169,18 +1193,19 @@ class Agent(BaseAgent):
 
         return False
 
-    def _loop(
+    def run(
         self,
+        conversation: Conversation,
+        *,
         on_round_start: callable | None = None,
         on_loop_exit: callable | None = None,
         steer_queue=None,
     ):
-        """Run the agent loop.  Permission interrupts and user steer messages
-        are handled internally: permission is auto-resolved and _loop_core
-        resumes automatically; steer messages inject user guidance at round
-        boundary without breaking turn structure.
+        """运行 Lead Agent 主循环。
 
-        messages 参数已移除，默认使用 self._store 作为上下文源。
+        Conversation 由调用方持有并传入，Agent 实例内部不保留任何会话状态。
+        Permission interrupts 和 user steer messages 在循环内部处理：
+        permission 自动解析并恢复 _loop_core；steer 在 round 边界注入为 user 消息。
         """
         wrapped_on_round_start = on_round_start
 
@@ -1216,7 +1241,11 @@ class Agent(BaseAgent):
             return None
 
         try:
-            self._loop_core(None, on_round_start=signal_check_on_round_start, on_loop_exit=on_loop_exit)
+            self._loop_core(
+                conversation,
+                on_round_start=signal_check_on_round_start,
+                on_loop_exit=on_loop_exit,
+            )
         except UserSteerInterrupt as exc:
             if exc.message is None:
                 print("\033[33m[Lead] User interrupted the agent loop.\033[0m")

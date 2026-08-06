@@ -13,7 +13,11 @@ sys.path.append(os.path.join(os.path.dirname(__file__), '.'))
 
 from src.infrastructure.clients.llm_clients import LLMClient
 from src.infrastructure.message_bus import bus, UserInputQueue
-from config.config import BASE_URL, API_KEY, CONTEXT_WINDOW
+from src.infrastructure.session import SessionManager
+from src.infrastructure.conversation import Conversation
+from src.infrastructure.context_store import ContextStore
+from config.config import BASE_URL, API_KEY, CONTEXT_WINDOW, KEEP_RECENT_ROUNDS
+from config.tools import LEAD_MILESTONE_EXTRACTORS
 from config.tools import (
     LEAD_AGENT_TOOLS, TOOL_HANDLERS,
 )
@@ -170,6 +174,18 @@ def run_single_agent():
 
     print("\033[36m=== Single Agent Mode (s09: async subagent + s10: queued input + s11: steer) ===\033[0m")
     llm = LLMClient(base_url=BASE_URL, api_key=API_KEY)
+
+    def _create_lead_conversation(session_id: str) -> Conversation:
+        return Conversation(
+            session_id=session_id,
+            context_store=ContextStore(
+                keep_recent_rounds=KEEP_RECENT_ROUNDS,
+                milestone_extractors=LEAD_MILESTONE_EXTRACTORS,
+            )
+        )
+
+    session_manager = SessionManager(conversation_factory=_create_lead_conversation)
+    conversation = session_manager.create("default_user")
     agent = Agent(llm=llm, context_window=CONTEXT_WINDOW)
 
     agent.tools = LEAD_AGENT_TOOLS
@@ -191,10 +207,10 @@ def run_single_agent():
         _prompt()
 
     def _run_loop(*, steer_injected=False):
-        """执行 agent._loop，带 agent_running 标志切换。"""
+        """执行 agent.run，带 agent_running 标志切换。"""
         uiq.set_agent_running(True)
         try:
-            agent._loop(steer_queue=uiq)
+            agent.run(conversation, steer_queue=uiq)
         finally:
             uiq.set_agent_running(False)
             _agent_done()
@@ -209,7 +225,7 @@ def run_single_agent():
                 steer_text = "\n".join(
                     f"<user_steer>{s}</user_steer>" for s in leftover_steers
                 )
-                agent._store.append_user_message(steer_text)
+                conversation.context_store.append_user_message(steer_text)
                 agent._log(f"[Steer] Injecting user steer into next round")
                 print("\033[33m[Steer] Injecting user steer into next round:\033[0m")
                 for s in leftover_steers:
@@ -220,7 +236,7 @@ def run_single_agent():
             # ---- 优先处理 inbox 消息（subagent_done, permission_request 等） ----
             idle_msgs = _idle_drain_inbox(uiq=uiq, log_fn=agent._log)
             if idle_msgs:
-                agent._store.append_user_message(idle_msgs[0]["content"])
+                conversation.context_store.append_user_message(idle_msgs[0]["content"])
                 agent._log(f"[Inbox] {idle_msgs[0].get('content', '')[:300]}")
                 _run_loop()
                 continue
@@ -243,7 +259,7 @@ def run_single_agent():
                 agent._log("[Manual Compact] Triggering context compression")
                 print("\033[33m[Manual Compact] Triggering context compression...\033[0m")
                 import re as _re
-                messages = agent.auto_compact(agent._store.snapshot_messages())
+                messages = agent.auto_compact(conversation.context_store.snapshot_messages())
                 summary_text = None
                 for msg in messages:
                     if msg.get("role") == "user" and isinstance(msg.get("content", ""), str):
@@ -253,7 +269,7 @@ def run_single_agent():
                             summary_text = m.group(1).strip() if m else content
                             break
                 if summary_text:
-                    agent._store.append_summary_checkpoint(summary_text)
+                    conversation.context_store.append_summary_checkpoint(summary_text)
                     agent.token_used = 0
                     print("\033[32m[Manual Compact] Context compressed successfully!\033[0m")
                 else:
@@ -267,7 +283,7 @@ def run_single_agent():
                 if inbox:
                     formatted = _format_inbox_messages(inbox, print_preview=True, uiq=uiq, log_fn=agent._log)
                     for msg in formatted:
-                        agent._store.append_user_message(msg["content"])
+                        conversation.context_store.append_user_message(msg["content"])
                     print("\033[32m[Inbox] Messages added to history for next round.\033[0m")
                 else:
                     print("Inbox is empty.")
@@ -281,7 +297,7 @@ def run_single_agent():
                 _prompt()
                 continue
 
-            agent._store.append_user_message(query)
+            conversation.context_store.append_user_message(query)
             agent._log(f"user >> {query}")
             _run_loop()
     finally:

@@ -9,7 +9,8 @@ APP_ROOT = Path.cwd()
 # LLM Client - Kimi (Moonshot) OpenAI 兼容 API
 # 请设置环境变量：export KIMI_API_KEY="your_api_key"
 # 可选设置环境变量覆盖模型：export KIMI_MODEL="kimi-for-coding"
-BASE_URL = 'https://api.kimi.com/coding/v1'
+# BASE_URL = 'https://api.kimi.com/coding/v1'
+BASE_URL = 'https://api.moonshot.cn/v1'
 API_KEY = os.environ.get('KIMI_API_KEY', '')
 
 # 可用模型（均为 256K 上下文、支持图片）：
@@ -25,6 +26,7 @@ _CONTEXT_WINDOW_MAP = {
     'kimi-for-coding-highspeed': 262_144,
     'k3-256k': 262_144,
     'k3': 262_144,
+    'kimi-k2.6': 262_144,
 }
 CONTEXT_WINDOW = _CONTEXT_WINDOW_MAP.get(MODEL, 262_144)
 
@@ -36,6 +38,7 @@ _DEFAULT_TEMPERATURE_MAP = {
     'kimi-for-coding-highspeed': 0.0,
     'k3-256k': 1.0,
     'k3': 1.0,
+    'kimi-k2.6': 1.0
 }
 DEFAULT_TEMPERATURE = float(
     os.environ.get('KIMI_TEMPERATURE', _DEFAULT_TEMPERATURE_MAP.get(MODEL, 0.0))
