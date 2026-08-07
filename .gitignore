@@ -32,6 +32,7 @@ Thumbs.db
 # Environment / secrets
 .env
 .env.*
+!.env.example
 
 # LLM tokenizer (large, reproducible)
 rsrc/tokenizer/

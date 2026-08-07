@@ -44,14 +44,20 @@ class LLMClient:
 
     def _load_tokenizer(self):
         """加载本地 tokenizer，失败或未安装 transformers 时回退到 tiktoken。"""
-        if os.path.isdir(TOKENIZER_PATH):
+        tokenizer_path = TOKENIZER_PATH
+        if not tokenizer_path:
+            # 未配置本地 tokenizer：默认使用 tiktoken，不输出任何提示
+            return _TiktokenFallbackTokenizer()
+
+        if os.path.isdir(tokenizer_path):
             try:
                 from transformers import AutoTokenizer
-                return AutoTokenizer.from_pretrained(TOKENIZER_PATH)
+                return AutoTokenizer.from_pretrained(tokenizer_path)
             except Exception as e:
-                print(f"\033[33m[Tokenizer Warning] 加载本地 tokenizer 失败: {e}，回退到 tiktoken (cl100k_base)\033[0m")
+                print(f"\033[33m[Tokenizer Warning] 加载本地 tokenizer 失败（路径：{tokenizer_path}）：{e}，回退到 tiktoken (cl100k_base)\033[0m")
                 return _TiktokenFallbackTokenizer()
-        print(f"\033[33m[Tokenizer Warning] 本地 tokenizer 路径不存在: {TOKENIZER_PATH}，使用 tiktoken (cl100k_base) 做近似统计\033[0m")
+
+        print(f"\033[33m[Tokenizer Warning] 本地 tokenizer 路径不存在：{tokenizer_path}，使用 tiktoken (cl100k_base) 做近似统计\033[0m")
         return _TiktokenFallbackTokenizer()
 
     def _retry_call(self, func, *args, **kwargs):

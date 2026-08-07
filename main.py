@@ -1,5 +1,5 @@
 """
-Agent Platform 统一入口
+Cortex Agent 统一入口
 用法:
     python main.py
 """
@@ -16,7 +16,10 @@ from src.infrastructure.message_bus import bus, UserInputQueue
 from src.infrastructure.session import SessionManager
 from src.infrastructure.conversation import Conversation
 from src.infrastructure.context_store import ContextStore
-from config.config import BASE_URL, API_KEY, CONTEXT_WINDOW, KEEP_RECENT_ROUNDS
+from config.config import (
+    BASE_URL, API_KEY, MODEL, CONTEXT_WINDOW, KEEP_RECENT_ROUNDS,
+    WORKDIR, TOKENIZER_PATH, check_config,
+)
 from config.tools import LEAD_MILESTONE_EXTRACTORS
 from config.tools import (
     LEAD_AGENT_TOOLS, TOOL_HANDLERS,
@@ -172,8 +175,17 @@ def run_single_agent():
     full_handlers = dict(TOOL_HANDLERS)
     register_send_message_handler(full_handlers, "lead")
 
-    print("\033[36m=== Single Agent Mode (s09: async subagent + s10: queued input + s11: steer) ===\033[0m")
+    check_config()
     llm = LLMClient(base_url=BASE_URL, api_key=API_KEY)
+
+    print("\033[36mCortex Agent 已启动\033[0m")
+    print(f"  工作目录: {WORKDIR}")
+    print(f"  当前模型: {MODEL}")
+    print(f"  API 地址: {BASE_URL}")
+    if TOKENIZER_PATH and os.path.isdir(TOKENIZER_PATH):
+        print(f"  Tokenizer: 本地 ({TOKENIZER_PATH})")
+    else:
+        print(f"  Tokenizer: tiktoken (cl100k_base) 近似估算")
 
     def _create_lead_conversation(session_id: str) -> Conversation:
         return Conversation(

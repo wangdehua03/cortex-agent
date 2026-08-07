@@ -194,6 +194,6 @@ class SkillLoader:
 
 
 if __name__ == "__main__":
-    s = SkillLoader("/home/dev2/PyProject/wangdehua/projects/agent_platform/skills")
+    s = SkillLoader(Path(__file__).resolve().parents[2] / "skills")
     print('test')
 
