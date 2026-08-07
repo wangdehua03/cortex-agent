@@ -207,13 +207,43 @@ def safe_path(p: str) -> Path:
         raise ValueError(f"Path escapes workspace: {p}")
     return path
 
+def _decode_text(data: bytes) -> tuple[str, str | None]:
+    """
+    尝试用常见编码解码字节流。
+    返回 (text, detected_encoding)。
+    若全部失败，使用 latin-1 兜底（保证不抛异常）。
+    """
+    # BOM 优先：带 BOM 的文件几乎可确定编码
+    if data.startswith(b"\xff\xfe\x00\x00"):
+        return data.decode("utf-32-le"), "utf-32-le"
+    if data.startswith(b"\x00\x00\xfe\xff"):
+        return data.decode("utf-32-be"), "utf-32-be"
+    if data.startswith(b"\xff\xfe"):
+        return data.decode("utf-16-le"), "utf-16-le"
+    if data.startswith(b"\xfe\xff"):
+        return data.decode("utf-16-be"), "utf-16-be"
+
+    candidates = ["utf-8", "gbk", "gb2312"]
+    for enc in candidates:
+        try:
+            return data.decode(enc), enc
+        except (UnicodeDecodeError, LookupError):
+            continue
+    # 最终兜底：latin-1 每个字节都有对应字符，不会抛异常
+    return data.decode("latin-1"), "latin-1"
+
+
 def run_read(path: str, limit: int = None) -> str:
     try:
-        text = safe_path(path).read_text()
+        fp = safe_path(path)
+        text, detected = _decode_text(fp.read_bytes())
         lines = text.splitlines()
         if limit and limit < len(lines):
             lines = lines[:limit] + [f"...({len(lines) - limit} more lines)"]
-        return "\n".join(lines)[:50000]
+        result = "\n".join(lines)[:50000]
+        if detected and detected != "utf-8":
+            result = f"[detected encoding: {detected}]\n{result}"
+        return result
     except Exception as e:
         return f"Error: {e}"
     
