@@ -1,3 +1,5 @@
+![Cortex Agent Banner](docs/images/Cortex_Agent_Banner.png)
+
 # Cortex Agent — LLM Agent Assistant for Operations Engineers
 
 Cortex Agent is a lightweight, self-built, pure-Python LLM agent framework. It runs directly on your Linux server or local workstation, collaborates with large language models via the command line, and turns natural language into real command execution.
