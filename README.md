@@ -70,17 +70,17 @@ All core logic lives in `src/agents/` and `src/infrastructure/`, with no depende
 
 ### 1. Environment Requirements
 
-- **Python 3.10+** (the code uses extensive Python 3.10 type annotation syntax, such as `dict | None`)
+- **Python 3.10+**
 - Any OpenAI-compatible LLM service (cloud or local)
 - Recommended environments: Linux / macOS / WSL; some interactive command features are limited on Windows
 
-Required third-party packages (no `requirements.txt` yet, please install manually):
+Install dependencies:
 
 ```bash
-pip install openai tiktoken transformers openpyxl xlrd pyyaml
+pip install -r requirements.txt
 ```
 
-> If you don't need the local tokenizer, you can install only `openai`, `tiktoken`, and `pyyaml`. Excel-related features require `openpyxl` / `xlrd`.
+> `requirements.txt` contains `openai`, `tiktoken`, `transformers`, `openpyxl`, `xlrd`, and `pyyaml`. If you don't need the local tokenizer, you can install only `openai`, `tiktoken`, and `pyyaml`. Excel-related features require `openpyxl` / `xlrd`.
 
 ### 2. Configure LLM
 
@@ -191,7 +191,6 @@ Welcome to help make it an "Agent that operations personnel truly dare to use" t
 
 ---
 
----
 
 # Cortex Agent — 面向运维工程师的 LLM 智能体助手
 
@@ -263,17 +262,17 @@ Agent 的每次命令执行都会回显到终端，你可以看到它要做什�
 
 ### 1. 环境要求
 
-- **Python 3.10+**（代码使用大量 3.10 类型注解语法，如 `dict | None`）
+- **Python 3.10+**
 - 任意兼容 OpenAI 协议的 LLM 服务（云端或本地）
 - 推荐运行环境：Linux / macOS / WSL；Windows 上部分交互式命令功能受限
 
-需要安装的第三方包（目前暂无 `requirements.txt`，请手动安装）：
+安装依赖：
 
 ```bash
-pip install openai tiktoken transformers openpyxl xlrd pyyaml
+pip install -r requirements.txt
 ```
 
-> 如果你不需要本地 tokenizer，可以只安装 `openai`、`tiktoken` 和 `pyyaml`；Excel 相关功能需要 `openpyxl` / `xlrd`。
+> `requirements.txt` 包含 `openai`、`tiktoken`、`transformers`、`openpyxl`、`xlrd`、`pyyaml`。如果你不需要本地 tokenizer，可以只安装 `openai`、`tiktoken` 和 `pyyaml`；Excel 相关功能需要 `openpyxl` / `xlrd`。
 
 ### 2. 配置 LLM
 

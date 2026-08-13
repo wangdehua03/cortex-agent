@@ -1,0 +1,6 @@
+openai
+tiktoken
+transformers
+openpyxl
+xlrd
+pyyaml
