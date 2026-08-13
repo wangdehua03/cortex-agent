@@ -1,6 +1,199 @@
+# Cortex Agent — LLM Agent Assistant for Operations Engineers
+
+Cortex Agent is a lightweight, self-built, pure-Python LLM agent framework. It runs directly on your Linux server or local workstation, collaborates with large language models via the command line, and turns natural language into real command execution.
+
+**Current focus: Operations / SRE / System Administration.** Other consumer-facing scenarios (browser automation, desktop file management, etc.) are not yet implemented and will be expanded gradually.
+
+---
+
+## Why Choose It?
+
+There are many agents on the market, but Cortex Agent has a clear positioning: **be a truly usable "ops copilot" on a server**, rather than another opaque black-box full-automation system.
+
+| Feature | Description |
+|------|------|
+| **Native server execution** | No Docker dependency, no browser extension needed. Just SSH into the server and run `python main.py` to start working. |
+| **Real command execution** | It can invoke `run_shell` to execute system commands, read logs, install software, restart services, and modify configurations. |
+| **Fully transparent and controllable** | Every command is echoed to the terminal, and sensitive / dangerous commands require your confirmation before execution. |
+| **Self-built core loop** | ReAct reasoning loop, context compression, task delegation, permission approval, and other core mechanisms are fully self-implemented and easy to customize. |
+| **Lightweight and dependency-free** | Pure Python, no additional daemon processes, databases, or message queues needed. Start and run immediately. |
+| **SubAgent collaboration** | Complex tasks can be split into multiple asynchronous SubAgents running in parallel, with the Lead Agent planning and aggregating results. |
+
+> **Who is it for?** Operations / Development / SRE personnel familiar with the Linux command line. If you need a "browser automation assistant" or a "chat-style UI", this project is not currently for you.
+
+---
+
+## What Can It Help You Do? (Operations Scenarios)
+
+Cortex Agent excels at operations tasks that require **"check system status → analyze → execute commands → verify results"**:
+
+- **Log troubleshooting**: Check `/var/log/` for errors in the last 30 minutes and summarize the cause.
+- **Service diagnosis**: Nginx returns 502. Inspect processes, ports, configuration, and upstream status.
+- **System inspection**: List disk, memory, CPU, zombie processes, and generate a Markdown report.
+- **Environment setup**: Install Python packages, system tools, and configure crontab on the server.
+- **Batch operations**: Execute the same set of commands on multiple machines and aggregate output.
+- **Configuration changes**: Edit `nginx.conf`, `systemd` service files, and reload to verify.
+
+Because these operations run directly on the server, the Agent can call real operations tools such as `systemctl`, `docker`, `kubectl`, `ss`, `netstat`, and `journalctl`, rather than simulating clicks through a browser.
+
+---
+
+## Core Design: Visible and Controllable
+
+### 1. Command Transparency
+Every command executed by the Agent is echoed to the terminal, so you can see what it is doing. If you feel the Agent is deviating from your intent, you can interrupt it at any time with `/interrupt` or `/stop` and interact with it.
+
+### 2. Permission Levels
+The `run_shell` tool has built-in command classification:
+
+- **Whitelist**: View-only commands such as `ls`, `grep`, `cat`, `ps`, `systemctl status`, and `journalctl` are executed directly.
+- **Sensitive commands**: Commands such as `wget`, `pip`, `npm`, `kill`, and `docker run` prompt you for `y/N` confirmation.
+- **Dangerous commands**: Commands such as `sudo`, `shutdown`, `mkfs`, `rm -rf /`, and `systemctl restart` show a clear warning and require double confirmation.
+
+> High-risk file operations (`rm` / `mv` / `chmod`, etc.) are also restricted to the `WORKDIR` scope to prevent accidental deletion of system paths.
+
+### 3. SubAgent Dangerous Operations Require Lead Approval
+When an asynchronous SubAgent reaches a dangerous command, it does not confirm directly. Instead, it sends the request to the Lead Agent, which aggregates all such requests and asks you once. This supports parallelism while avoiding permission pop-ups from multiple subtasks individually.
+
+### 4. Fully Self-Controlled ReAct Core
+All core logic lives in `src/agents/` and `src/infrastructure/`, with no dependency on third-party agent frameworks. You can:
+- Modify system prompts to change Agent behavior;
+- Adjust tool JSON schemas to add new tools;
+- Rewrite the command classification list to match enterprise security policies;
+- Customize context compression strategies for long log analysis scenarios.
+
+---
+
+## Quick Start
+
+### 1. Environment Requirements
+
+- **Python 3.10+** (the code uses extensive Python 3.10 type annotation syntax, such as `dict | None`)
+- Any OpenAI-compatible LLM service (cloud or local)
+- Recommended environments: Linux / macOS / WSL; some interactive command features are limited on Windows
+
+Required third-party packages (no `requirements.txt` yet, please install manually):
+
+```bash
+pip install openai tiktoken transformers openpyxl xlrd pyyaml
+```
+
+> If you don't need the local tokenizer, you can install only `openai`, `tiktoken`, and `pyyaml`. Excel-related features require `openpyxl` / `xlrd`.
+
+### 2. Configure LLM
+
+Copy the example configuration file and fill it in:
+
+```bash
+cp .env.example .env
+```
+
+Edit `.env`:
+
+```bash
+# Third-party API example (Moonshot / OpenAI / DeepSeek)
+LLM_BASE_URL=https://api.moonshot.cn/v1
+LLM_API_KEY=your_api_key_here
+LLM_MODEL=kimi-for-coding
+
+# Local deployment example (vLLM / Ollama / xinference)
+# LLM_BASE_URL=http://localhost:8000/v1
+# LLM_MODEL=Qwen/Qwen3-32B
+# TOKENIZER_PATH=/path/to/local/tokenizer
+```
+
+> Environment variable priority: `LLM_*` > legacy `KIMI_*` > `config/config.py` defaults. You can also inject them directly via `export`.
+
+### 3. Start
+
+```bash
+python main.py
+```
+
+If critical configuration is missing, the program will print a clear message and exit.
+
+### 4. Terminal Interaction Commands
+
+After starting, you can enter natural language directly to let the Agent work, or use the following commands:
+
+| Command | Function |
+|------|------|
+| `/inbox` | View and process Lead Agent inbox messages (SubAgent completions, permission requests, etc.) |
+| `/task_list` | List all tasks and their statuses |
+| `/manual_compact` | Manually trigger context compression |
+| `/interrupt` / `/stop` | Interrupt the current Agent loop and provide new input |
+| `q` / `exit` | Exit the program |
+
+### 5. A Simple Example
+
+```text
+> Help me check current disk usage and find the top 5 directories by usage
+
+(Agent invokes run_shell to execute df/du and returns the aggregated result)
+```
+
+```text
+> Help me check whether nginx is running, and start it if not
+
+(Agent invokes systemctl status nginx; if not running, it prompts for confirmation before starting)
+```
+
+---
+
+## Safety and Notes
+
+1. **Working directory sandbox**: File read/write operations are restricted to `WORKDIR` (default project root directory) to avoid accidental modification of system files.
+2. **Dangerous commands**: Dangerous / sensitive commands ask the user for confirmation. SubAgent dangerous commands are aggregated by the Lead Agent before unified confirmation.
+3. **Background tasks**: Commands that time out are promoted to background threads to continue execution, and the results are notified via MessageBus when finished. Note that this may leave long-running child processes.
+4. **Production environment**: It is recommended to try it first on a test server or in an isolated container environment, and become familiar with the command classification strategy before using it in production.
+
+---
+
+## Current Status and Roadmap
+
+### Implemented
+- ReAct-based Lead Agent main loop
+- Asynchronous SubAgent delegation and result aggregation
+- Command-line interaction and permission control
+- Context compression and loop detection
+- Task management (Task Store) and dependency relationships
+- File / Excel read/write tools
+
+### Not Yet Supported (Planned)
+- Web UI / Desktop GUI
+- Browser automation (Selenium / Playwright)
+- Non-technical user scenarios such as file management and office assistant
+- Richer prebuilt skill packages (Skills)
+
+If you want it to excel at a new operations sub-scenario, feel free to expand tools and prompts via Issue or PR.
+
+---
+
+## Logs
+
+Each Agent writes logs independently without interfering with each other:
+
+- **Lead Agent**: `logs/lead_agent/lead_{timestamp}.log`
+- **SubAgent**: `logs/subagents/{subagent_id}_{timestamp}.log`
+
+---
+
+## Contributing and Feedback
+
+Cortex Agent is still iterating rapidly. If you:
+- Have run interesting real-world operations cases;
+- Find the dangerous command classification strategy unreasonable;
+- Want to add tools or prompts for a specific scenario;
+
+Welcome to help make it an "Agent that operations personnel truly dare to use" through Issue or Pull Request.
+
+---
+
+---
+
 # Cortex Agent — 面向运维工程师的 LLM 智能体助手
 
-Cortex Agent 是一款轻量级、纯自研的 LLM 智能体框架。它直接运行在你的 Linux 服务器或本地工作站上，通过命令行与大模型协作，把“说人话”转化为“执行真实命令”。
+Cortex Agent 是一款轻量级、纯自研、基于Python的 LLM 智能体框架。它直接运行在你的 Linux 服务器或本地工作站上，通过命令行与大模型协作，把“说人话”转化为“执行真实命令”。
 
 **当前主攻场景：运维 / SRE / 系统管理。**  其他面向普通用户的场景（浏览器操作、桌面文件管理等）尚未实现，后续会逐步扩展。
 
@@ -41,7 +234,7 @@ Cortex Agent 最擅长处理需要**“查看系统状态 → 分析 → 执行�
 ## 核心设计：看得见、管得住
 
 ### 1. 命令透明
-Agent 的每次命令执行都会回显到终端，你可以看到它要做什么。你随时可以用 `/interrupt` 或 `/stop` 叫停。
+Agent 的每次命令执行都会回显到终端，你可以看到它要做什么。如果你认为Agent偏离了你的思路，你随时可以用 `/interrupt` 或 `/stop` 叫停，并和它交互。
 
 ### 2. 权限分级
 `run_shell` 工具内置命令分级：
@@ -121,7 +314,7 @@ python main.py
 | `/inbox` | 查看并处理 Lead Agent 的收件箱消息（SubAgent 完成、权限请求等） |
 | `/task_list` | 列出所有任务及状态 |
 | `/manual_compact` | 手动触发上下文压缩 |
-| `/interrupt` / `/stop` | 中断当前 Agent 循环 |
+| `/interrupt` / `/stop` | 中断当前 Agent 循环，提出你的新意见 |
 | `q` / `exit` | 退出程序 |
 
 ### 5. 一个简单示例
@@ -138,49 +331,13 @@ python main.py
 （Agent 调用 systemctl status nginx；若未运行，会提示你确认后才启动）
 ```
 
----
-
-## 架构概览
-
-```
-┌─────────────────────────────────────────────────────────┐
-│                    Lead Agent                            │
-│   规划任务 → 委托 SubAgent → 汇总结果 → 请求用户审批     │
-│                                                          │
-│   Task Store（任务 DAG）  +  MessageBus（消息总线）      │
-└────────────┬──────────────────────────────┬─────────────┘
-             │ task_delegate                 │ task_delegate
-             ▼                               ▼
-    ┌──────────────────┐        ┌──────────────────┐
-    │   AsyncSubAgent    │        │   AsyncSubAgent    │
-    │   独立线程执行      │        │   独立线程执行      │
-    │   - run_shell      │        │   - run_shell      │
-    │   - 文件读写        │        │   - Todo 跟踪       │
-    │   - 结果回报        │        │   - 结果回报        │
-    └──────────────────┘        └──────────────────┘
-```
-
-核心模块：
-
-| 模块 | 文件 | 说明 |
-|------|------|------|
-| Lead Agent | `src/agents/agent.py` | 任务规划、SubAgent 委托、权限审批、inbox 处理 |
-| SubAgent | `src/agents/async_subagent.py` | 独立线程执行具体任务，完成后回报 Lead |
-| 消息总线 | `src/infrastructure/message_bus.py` | Agent 之间线程安全通信 |
-| 任务存储 | `src/infrastructure/task_store.py` | 内存任务管理，支持依赖关系 `blocked_by` |
-| 上下文管理 | `src/infrastructure/context_store.py` | 对话历史、自动摘要、turn 级压缩 |
-| 工具实现 | `config/tools/` + `src/utils/` | 命令 / 文件 / Excel / 任务委托等工具定义与实现 |
-| 跨平台 Shell | `src/utils/shell_backend.py` | 命令解析、权限分级、跨平台执行 |
-
----
 
 ## 安全与注意事项
 
-1. **API 密钥**：不要直接提交 `.env`、`.vscode/launch.json` 或 `config/config.py` 中的真实密钥到仓库。
-2. **工作目录沙箱**：文件读写操作被限制在 `WORKDIR`（默认项目根目录）内，避免误操作系统文件。
-3. **危险命令**：危险 / 敏感命令会询问用户，SubAgent 的危险命令需经 Lead Agent 汇总后统一确认。
-4. **后台任务**：命令超时后会提升为后台线程继续执行，完成后通过 MessageBus 通知结果；注意这可能留下长时间运行的子进程。
-5. **生产环境**：建议先在测试服务器或容器外隔离环境中试用，熟悉命令分级策略后再用于生产。
+1. **工作目录沙箱**：文件读写操作被限制在 `WORKDIR`（默认项目根目录）内，避免误操作系统文件。
+2. **危险命令**：危险 / 敏感命令会询问用户，SubAgent 的危险命令需经 Lead Agent 汇总后统一确认。
+3. **后台任务**：命令超时后会提升为后台线程继续执行，完成后通过 MessageBus 通知结果；注意这可能留下长时间运行的子进程。
+4. **生产环境**：建议先在测试服务器或容器外隔离环境中试用，熟悉命令分级策略后再用于生产。
 
 ---
 
@@ -201,29 +358,6 @@ python main.py
 - 更丰富的预置技能包（Skills）
 
 如果你希望它擅长某个新的运维子场景，欢迎通过 Issue 或 PR 一起扩展工具和 prompt。
-
----
-
-## 项目结构
-
-```
-cortex_agent/
-├── main.py                    # 统一入口
-├── config/
-│   ├── config.py              # LLM 连接、阈值、路径配置
-│   ├── prompts/               # Lead / SubAgent / 压缩的 system prompt
-│   └── tools/                 # 工具定义（common / lead / subagent）
-├── src/
-│   ├── agents/                # Lead Agent + SubAgent
-│   ├── infrastructure/        # 消息总线、任务存储、上下文、会话、LLM 客户端
-│   └── utils/                 # 工具实现、Shell 后端、日志、技能加载
-├── skills/                    # 技能目录（当前为空，规划中）
-├── docs/                      # 文档目录
-├── test/                      # 测试目录
-├── logs/                      # 运行日志（.gitignore 忽略）
-├── .env.example               # 环境变量示例
-└── README.md                  # 本文件
-```
 
 ---
 
