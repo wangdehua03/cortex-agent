@@ -1,9 +1,18 @@
 from pathlib import Path
 import os
 
-# Agent 执行 bash / 文件操作的工作目录（路径沙箱限制在此目录内）
+from dotenv import load_dotenv
+
+# 项目根目录：固定指向代码库所在目录，用于加载 .env、定位日志目录等。
+APP_ROOT = Path(__file__).resolve().parent.parent
+
+# 加载项目根目录的 .env 文件（如果存在），将其中定义的环境变量注入到当前进程。
+# 注意：load_dotenv 不会覆盖已经存在的环境变量，因此 export 的方式仍然优先级更高。
+load_dotenv(APP_ROOT / ".env")
+
+# Agent 执行 bash / 文件操作的工作目录（路径沙箱限制在此目录内）。
+# 默认与 APP_ROOT 相同；如果从其他目录启动，WORKDIR 会跟随当前工作目录。
 WORKDIR = Path.cwd()
-APP_ROOT = Path.cwd()
 
 
 # ============================================================
