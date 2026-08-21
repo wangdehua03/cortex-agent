@@ -7,8 +7,9 @@ import threading
 import time
 from pathlib import Path
 from typing import Union, List, Optional, Callable
-import openpyxl, xlrd
+import openpyxl, xlrd, docx
 from openpyxl.styles import Alignment
+from pypdf import PdfReader
 
 sys.path.append(os.path.join(os.path.dirname(__file__), '../'))
 from config.config import WORKDIR
@@ -142,6 +143,27 @@ def _ask_permission(reason: str, command: str) -> bool:
         return ans.strip().lower() in ("y", "yes")
 
 
+def _ask_path_permission(path: str, reason: str) -> bool:
+    """文件路径超出工作区时的权限申请回调。
+
+    尝试通过全局注册的用户输入队列获取确认（队列化模式）；
+    未注册时回退到直接 input()。
+    """
+    try:
+        _uiq = _get_user_input_queue()
+    except LookupError:
+        _uiq = None
+
+    print(f"\033[33m⚠  {reason}\033[0m")
+    print(f"   路径: {path}")
+    if _uiq is not None:
+        ans = _uiq.prompt_and_wait("   允许访问吗? (y/N): ")
+        return ans is not None and ans.strip().lower() in ("y", "yes")
+    else:
+        ans = input("   允许访问吗? (y/N): ")
+        return ans.strip().lower() in ("y", "yes")
+
+
 def _is_interactive_command(command: str) -> bool:
     """判断命令是否需要交互式输入（如密码、确认等）。清单由平台后端提供。"""
     backend = get_backend()
@@ -197,14 +219,19 @@ def _is_within_workspace(resolved: str) -> bool:
 
 
 
-def safe_path(p: str) -> Path:
-    """防止操作目录逃逸（Windows 下大小写不敏感比较）"""
+def safe_path(p: Union[str, Path]) -> Path:
+    """防止操作目录逃逸（Windows 下大小写不敏感比较）。
+
+    如果路径超出工作区，先向用户申请权限；用户拒绝或交互失败时抛出 ValueError。
+    """
     root = WORKDIR.resolve()
-    path = (root / p).resolve()
+    path = (root / Path(p)).resolve()
     root_s = os.path.normcase(str(root))
     path_s = os.path.normcase(str(path))
     if path_s != root_s and not path_s.startswith(root_s + os.sep):
-        raise ValueError(f"Path escapes workspace: {p}")
+        reason = f"Path outside workspace: {p}"
+        if not _ask_path_permission(p, reason):
+            raise ValueError(f"Path escapes workspace: {p}")
     return path
 
 def _decode_text(data: bytes) -> tuple[str, str | None]:
@@ -298,7 +325,7 @@ def read_excel_to_md(file_path: Union[str, Path]) -> str:
     Returns:
         str: Markdown 格式的表格字符串
     """
-    file_path = Path(file_path)
+    file_path = safe_path(str(file_path))
     if not file_path.exists():
         raise FileNotFoundError(f"文件不存在: {file_path}")
     
@@ -356,6 +383,55 @@ def read_excel_to_md(file_path: Union[str, Path]) -> str:
     return "\n".join(md_lines)
 
 
+def read_docx_to_text(path: Union[str, Path]) -> str:
+    """
+    读取 Word 文档 (.docx)，返回纯文本内容。
+    会保留段落结构，并将表格转换为 '|' 分隔的文本行。
+    """
+    file_path = safe_path(path)
+    document = docx.Document(file_path)
+    lines: List[str] = []
+
+    for para in document.paragraphs:
+        text = para.text.strip()
+        if text:
+            lines.append(text)
+
+    for table in document.tables:
+        lines.append("\n[Table]")
+        for row in table.rows:
+            cells = [cell.text.replace("\n", " ").replace("|", "\\|") for cell in row.cells]
+            lines.append(" | ".join(cells))
+        lines.append("[End Table]\n")
+
+    result = "\n".join(lines)
+    return result[:50000]
+
+
+def read_pdf_to_text(path: Union[str, Path], max_pages: int = None) -> str:
+    """
+    读取 PDF 文件，返回提取的文本内容。
+    默认读取所有页面；可通过 max_pages 限制页数。
+    """
+    file_path = safe_path(path)
+    reader = PdfReader(str(file_path))
+    total_pages = len(reader.pages)
+    end_page = min(max_pages, total_pages) if max_pages else total_pages
+
+    lines: List[str] = []
+    for i in range(end_page):
+        page = reader.pages[i]
+        text = page.extract_text() or ""
+        lines.append(f"--- Page {i + 1} ---")
+        if text.strip():
+            lines.append(text.strip())
+
+    result = "\n".join(lines)
+    if max_pages and end_page < total_pages:
+        result += f"\n\n...(truncated after {max_pages} of {total_pages} pages)"
+    return result[:50000]
+
+
 def _parse_md_table(md_content: str) -> List[List[str]]:
     """
     解析markdown表格，处理<br>标签还原为换行符
@@ -372,8 +448,13 @@ def _parse_md_table(md_content: str) -> List[List[str]]:
         # 分割单元格
         # 处理转义的管道符 \|, 先替换为临时标记
         temp_line = line.replace('\\|','<<PIPE>>')
-        # 按 | 分割， 过滤首尾空字符串
-        cells = [cell.strip() for cell in temp_line.split('|') if cell.strip() != '']
+        # 按 | 分割，保留空单元格（仅去掉因首尾 | 产生的空字符串）
+        parts = temp_line.split('|')
+        if temp_line.startswith('|'):
+            parts = parts[1:]
+        if temp_line.endswith('|'):
+            parts = parts[:-1]
+        cells = [cell.strip() for cell in parts]
         # 还原管道符和换行
         cells = [cell.replace('<<PIPE>>','|').replace('<br>','\n') for cell in cells]
 
@@ -387,7 +468,7 @@ def write_md_to_excel(file_path: Union[str, Path], md_content: str) -> None:
     将 Markdown 表格写入xlsx文件
     支持<br>标签还原为单元格内换行
     """
-    file_path = Path(file_path)
+    file_path = safe_path(str(file_path))
     suffix = file_path.suffix.lower()
     rows = _parse_md_table(md_content)
 

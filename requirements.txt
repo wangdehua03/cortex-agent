@@ -3,5 +3,7 @@ tiktoken
 transformers
 openpyxl
 xlrd
+python-docx
+pypdf
 pyyaml
 python-dotenv

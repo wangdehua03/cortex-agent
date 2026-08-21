@@ -84,7 +84,7 @@ class SkillLoader:
                 self._registry[item.name] = item.as_posix()
 
     def get_descriptions(self, skill_path: Path) -> str:
-        skill_md = Path(skill_path / "SKILL.md").read_text()
+        skill_md = Path(skill_path / "SKILL.md").read_text(encoding="utf-8")
         meta, _ = self._parse_frontmatter(skill_md)
         if meta:
             return f"name: {meta.get('name')}\ndescription: {meta.get('description')}"
@@ -123,18 +123,18 @@ class SkillLoader:
         skill = {}
         skill_path = Path(self._registry[skill_name])
         # 读取 SKILL.md 完整内容
-        skill_md = Path(skill_path / "SKILL.md").read_text()
+        skill_md = Path(skill_path / "SKILL.md").read_text(encoding="utf-8")
         skill["skill_md"] = skill_md
         # 读取 README.md
         readme_path = Path(skill_path / "README.md")
         if readme_path.exists():
-            readme_md = readme_path.read_text()
+            readme_md = readme_path.read_text(encoding="utf-8")
             skill["readme_md"] = readme_md
         # 读取 examples
         examples_dir = Path(skill_path / "examples")
         if examples_dir.exists():
             skill_examples = [
-                f.read_text()
+                f.read_text(encoding="utf-8")
                 for f in sorted(examples_dir.glob("*.md"))
             ]
             skill["skill_examples"] = skill_examples

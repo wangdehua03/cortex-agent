@@ -39,6 +39,8 @@ def build_tool_handlers(permission_callback=None):
         "edit_file":     lambda **kw: _validate_and_call(run_edit, ["path", "old_text", "new_text"], **kw),
         "read_excel":    lambda **kw: _validate_and_call(read_excel_to_md, ["file_path"], **kw),
         "write_excel":   lambda **kw: _validate_and_call(write_md_to_excel, ["file_path", "md_content"], **kw),
+        "read_word":     lambda **kw: _validate_and_call(read_docx_to_text, ["path"], **kw),
+        "read_pdf":      lambda **kw: _validate_and_call(read_pdf_to_text, ["path"], **kw),
     }
 
 
@@ -76,6 +78,8 @@ MILESTONE_EXTRACTORS = {
     "edit_file": lambda args, result: f"edit_file: {args.get('path', '')}",
     "read_excel": lambda args, result: f"read_excel: {args.get('file_path', '')}",
     "write_excel": lambda args, result: f"write_excel: {args.get('file_path', '')}",
+    "read_word": lambda args, result: f"read_word: {args.get('path', '')}",
+    "read_pdf": lambda args, result: f"read_pdf: {args.get('path', '')}",
     "send_message": lambda args, result: (
         f"send_message → {args.get('to', '')} [{args.get('msg_type', 'message')}]"
     ),
@@ -181,6 +185,44 @@ COMMON_TOOLS = [
                     }
                 },
                 "required": ["file_path", "md_content"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "read_word",
+            "description": "Reads a Microsoft Word document (.docx) and returns its text content, including paragraphs and tables.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "The path to the .docx file to read."
+                    }
+                },
+                "required": ["path"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "read_pdf",
+            "description": "Reads a PDF file and returns its extracted text content, paginated by page markers.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": "The path to the PDF file to read."
+                    },
+                    "max_pages": {
+                        "type": "integer",
+                        "description": "Optional maximum number of pages to read. If omitted, all pages are returned."
+                    }
+                },
+                "required": ["path"]
             }
         }
     },

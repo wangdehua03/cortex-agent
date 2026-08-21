@@ -42,3 +42,6 @@ rsrc/tokenizer/
 
 # SubAgent logs
 logs/
+
+# Test-generated fixtures
+test/fixtures/
